@@ -585,28 +585,34 @@ class ReserveringBot:
                 logger.warning("Geen padel-slots gevonden, gebruik alle slots")
                 padel_slots = slots_info
 
-            # Probeer elke voorkeurstijd
+            # Probeer elke voorkeurstijd, per tijd de banen in voorkeursvolgorde
             for tijd in tijden:
                 matching = [s for s in padel_slots if s["tijd"] == tijd]
-                if matching:
-                    # Neem de eerste match (of filter op baan_voorkeur)
-                    slot = matching[0]
-                    logger.info(f"Match gevonden: {tijd} op {slot['baan']}")
+                if not matching:
+                    logger.warning(f"Tijdslot {tijd} niet beschikbaar op padel-banen")
+                    continue
 
-                    # Klik op het element via de tag + index
-                    selector = f"{slot['tagName'].lower()}:nth-of-type({slot['index'] + 1})"
-                    # Gebruik een directere methode: zoek de tijd-tekst binnen padel-context
+                # Sorteer op baanvoorkeur als die is opgegeven
+                if baan_voorkeur:
+                    slot = self._kies_baan_op_voorkeur(matching, baan_voorkeur)
+                else:
+                    slot = matching[0]
+
+                if slot:
+                    logger.info(f"Match gevonden: {tijd} op {slot['baan']}")
                     self._klik_tijdslot_op_padel(tijd, slot["baan"])
                     return {"tijd": tijd, "baan": slot["baan"]}
 
-                logger.warning(f"Tijdslot {tijd} niet beschikbaar op padel-banen")
-
-            # Fallback: eerste beschikbare padel-slot
+            # Fallback: eerste beschikbare padel-slot (op baanvoorkeur)
             if padel_slots:
-                slot = padel_slots[0]
-                logger.info(f"Fallback: {slot['tijd']} op {slot['baan']}")
-                self._klik_tijdslot_op_padel(slot["tijd"], slot["baan"])
-                return {"tijd": slot["tijd"], "baan": slot["baan"]}
+                if baan_voorkeur:
+                    slot = self._kies_baan_op_voorkeur(padel_slots, baan_voorkeur)
+                else:
+                    slot = padel_slots[0]
+                if slot:
+                    logger.info(f"Fallback: {slot['tijd']} op {slot['baan']}")
+                    self._klik_tijdslot_op_padel(slot["tijd"], slot["baan"])
+                    return {"tijd": slot["tijd"], "baan": slot["baan"]}
 
             logger.error("Geen beschikbaar tijdslot gevonden")
             self._screenshot("07_geen_slots")
@@ -616,6 +622,48 @@ class ReserveringBot:
             logger.error(f"Fout bij baan selectie: {e}")
             self._screenshot("07_baan_fout")
             return None
+
+    def _extract_baan_nummer(self, baan_naam: str) -> int | None:
+        """
+        Haal het baannummer uit een baannaam zoals '11 Padel 1 Kunstgras'.
+        Zoekt naar het getal direct na 'Padel' of 'Baan'.
+
+        Returns:
+            Het baannummer als int, of None.
+        """
+        import re
+        match = re.search(r'(?:padel|baan)\s*(\d+)', baan_naam, re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
+
+    def _kies_baan_op_voorkeur(self, slots: list[dict], baan_voorkeur: list[int]) -> dict | None:
+        """
+        Kies het beste slot op basis van de baanvoorkeur-volgorde.
+
+        Doorloopt de baan_voorkeur lijst (bijv. [1, 3, 4, 2]) en
+        retourneert het eerste slot dat op een voorkeursbaan beschikbaar is.
+
+        Args:
+            slots: Lijst met beschikbare slots (elk met 'baan' key).
+            baan_voorkeur: Lijst met baannummers in volgorde van voorkeur.
+
+        Returns:
+            Het beste beschikbare slot, of het eerste slot als geen voorkeur matcht.
+        """
+        for voorkeur_nr in baan_voorkeur:
+            for slot in slots:
+                baan_nr = self._extract_baan_nummer(slot["baan"])
+                if baan_nr == voorkeur_nr:
+                    logger.info(f"Baan {voorkeur_nr} beschikbaar: {slot['baan']}")
+                    return slot
+                    
+            logger.debug(f"Baan {voorkeur_nr} niet beschikbaar")
+
+        # Geen enkele voorkeursbaan beschikbaar, neem de eerste
+        logger.warning(f"Geen voorkeursbaan ({baan_voorkeur}) beschikbaar, "
+                       f"neem eerste: {slots[0]['baan']}")
+        return slots[0] if slots else None
 
     def _klik_tijdslot_op_padel(self, tijd: str, baan_naam: str):
         """

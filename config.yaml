@@ -29,7 +29,7 @@ reservering:
 
   # Voorkeursbanen (padelbaan nummers, in volgorde van voorkeur)
   # Laat leeg om de eerste beschikbare baan te pakken
-  baan_voorkeur: [1]
+  baan_voorkeur: [1, 3, 4, 2]
 
   # Duur van de reservering in minuten
   duur_minuten: 60
