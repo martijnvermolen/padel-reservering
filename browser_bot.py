@@ -850,6 +850,7 @@ class ReserveringBot:
         page_text = self.page.evaluate("""() => {
             return document.body.innerText.toLowerCase();
         }""") or ""
+        current_url = self.page.url.lower()
 
         success_indicators = [
             "reservering geplaatst", "reservering bevestigd",
@@ -874,10 +875,17 @@ class ReserveringBot:
                 logger.warning(f"Foutmelding gevonden: '{indicator}'")
                 return False
 
-        # Neem een extra screenshot van de volledige pagina-tekst voor debugging
+        # Check of de wizard is verlaten (redirect naar hoofdmenu = succes)
+        # De reserveringswizard draait op /me/ReservationsPlayers
+        # Als we daar weg zijn en geen foutmelding zien, is het waarschijnlijk gelukt
+        if "reservationsplayers" not in current_url:
+            logger.info(f"Wizard verlaten (URL: {current_url}) - reservering waarschijnlijk gelukt")
+            return True
+
+        # Nog steeds op de wizard-pagina zonder duidelijke indicator
         logger.warning("Geen duidelijke bevestiging gevonden - controleer screenshots")
+        logger.debug(f"URL: {current_url}")
         logger.debug(f"Pagina tekst (eerste 500 tekens): {page_text[:500]}")
-        # Voorzichtig: als we geen duidelijke bevestiging zien, neem aan dat het NIET gelukt is
         return False
 
     # =========================================================================
