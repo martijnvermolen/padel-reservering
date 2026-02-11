@@ -369,7 +369,10 @@ function renderDagen() {
           </div>
         `).join('')}
         <div class="add-player-row">
-          <input type="text" placeholder="Naam toevoegen..." data-dag="${dag.dag}">
+          <div class="autocomplete-wrap">
+            <input type="text" placeholder="Naam toevoegen..." data-dag="${dag.dag}" autocomplete="off">
+            <div class="autocomplete-dropdown hidden"></div>
+          </div>
           <button data-dag="${dag.dag}">Voeg toe</button>
         </div>
       </div>
@@ -430,10 +433,50 @@ function attachDayCardListeners() {
   document.querySelectorAll('.add-player-row input').forEach(input => {
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
-        const dag = parseInt(e.currentTarget.dataset.dag);
-        handleAddPlayer(dag, e.currentTarget);
+        e.preventDefault();
+        const dropdown = e.currentTarget.parentElement.querySelector('.autocomplete-dropdown');
+        const active = dropdown.querySelector('.autocomplete-item.active');
+        if (active && !dropdown.classList.contains('hidden')) {
+          // Select the highlighted suggestion
+          e.currentTarget.value = active.dataset.name;
+          dropdown.classList.add('hidden');
+          const dag = parseInt(e.currentTarget.dataset.dag);
+          handleAddPlayer(dag, e.currentTarget);
+        } else {
+          const dag = parseInt(e.currentTarget.dataset.dag);
+          handleAddPlayer(dag, e.currentTarget);
+        }
+      } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        const dropdown = e.currentTarget.parentElement.querySelector('.autocomplete-dropdown');
+        if (dropdown.classList.contains('hidden')) return;
+        navigateAutocomplete(dropdown, e.key === 'ArrowDown' ? 1 : -1);
+      } else if (e.key === 'Escape') {
+        const dropdown = e.currentTarget.parentElement.querySelector('.autocomplete-dropdown');
+        dropdown.classList.add('hidden');
       }
     });
+
+    // Autocomplete on input
+    input.addEventListener('input', (e) => {
+      const dagNr = parseInt(e.currentTarget.dataset.dag);
+      showAutocomplete(e.currentTarget, dagNr);
+    });
+
+    // Show dropdown on focus if there's text
+    input.addEventListener('focus', (e) => {
+      const dagNr = parseInt(e.currentTarget.dataset.dag);
+      if (e.currentTarget.value.trim().length > 0) {
+        showAutocomplete(e.currentTarget, dagNr);
+      }
+    });
+  });
+
+  // Close dropdowns when clicking outside
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.autocomplete-wrap')) {
+      document.querySelectorAll('.autocomplete-dropdown').forEach(d => d.classList.add('hidden'));
+    }
   });
 }
 
@@ -569,9 +612,95 @@ function handleAddPlayer(dagNr, inputEl) {
   spelers.push(naam);
   setSpelersVoorDag(dagNr, spelers);
 
+  // Auto-add to bekende_spelers if not already there
+  addToBekend(naam);
+
   inputEl.value = '';
   markDirty();
   renderDagen();
+}
+
+// --------------------------------------------------------------------------
+// Autocomplete helpers
+// --------------------------------------------------------------------------
+
+function getBekendSpelers() {
+  return state.config?.medespelers?.bekende_spelers || [];
+}
+
+function addToBekend(naam) {
+  if (!state.config.medespelers) state.config.medespelers = {};
+  if (!state.config.medespelers.bekende_spelers) state.config.medespelers.bekende_spelers = [];
+
+  const list = state.config.medespelers.bekende_spelers;
+  const exists = list.some(n => n.toLowerCase() === naam.toLowerCase());
+  if (!exists) {
+    list.push(naam);
+  }
+}
+
+function showAutocomplete(inputEl, dagNr) {
+  const query = inputEl.value.trim().toLowerCase();
+  const dropdown = inputEl.parentElement.querySelector('.autocomplete-dropdown');
+
+  if (!query) {
+    dropdown.classList.add('hidden');
+    return;
+  }
+
+  const huidigeSpelers = getSpelersVoorDag(dagNr);
+  const bekende = getBekendSpelers();
+
+  // Filter: match on query, exclude already-added players
+  const matches = bekende.filter(naam =>
+    naam.toLowerCase().includes(query) &&
+    !huidigeSpelers.some(s => s.toLowerCase() === naam.toLowerCase())
+  );
+
+  if (matches.length === 0) {
+    dropdown.classList.add('hidden');
+    return;
+  }
+
+  dropdown.innerHTML = matches.map(naam =>
+    `<div class="autocomplete-item" data-name="${escapeHtml(naam)}">${highlightMatch(naam, query)}</div>`
+  ).join('');
+
+  dropdown.classList.remove('hidden');
+
+  // Click handler for each suggestion
+  dropdown.querySelectorAll('.autocomplete-item').forEach(item => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // Prevent blur before we can read the value
+      inputEl.value = item.dataset.name;
+      dropdown.classList.add('hidden');
+      handleAddPlayer(dagNr, inputEl);
+    });
+  });
+}
+
+function highlightMatch(name, query) {
+  const idx = name.toLowerCase().indexOf(query);
+  if (idx === -1) return escapeHtml(name);
+  const before = name.slice(0, idx);
+  const match = name.slice(idx, idx + query.length);
+  const after = name.slice(idx + query.length);
+  return `${escapeHtml(before)}<strong>${escapeHtml(match)}</strong>${escapeHtml(after)}`;
+}
+
+function navigateAutocomplete(dropdown, direction) {
+  const items = [...dropdown.querySelectorAll('.autocomplete-item')];
+  if (!items.length) return;
+
+  const activeIdx = items.findIndex(i => i.classList.contains('active'));
+  items.forEach(i => i.classList.remove('active'));
+
+  let nextIdx = activeIdx + direction;
+  if (nextIdx < 0) nextIdx = items.length - 1;
+  if (nextIdx >= items.length) nextIdx = 0;
+
+  items[nextIdx].classList.add('active');
+  items[nextIdx].scrollIntoView({ block: 'nearest' });
 }
 
 // --------------------------------------------------------------------------

@@ -285,8 +285,13 @@ main {
   margin-top: 8px;
 }
 
-.add-player-row input {
+.autocomplete-wrap {
   flex: 1;
+  position: relative;
+}
+
+.add-player-row input {
+  width: 100%;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -320,6 +325,53 @@ main {
 
 .add-player-row button:hover {
   background: var(--accent-hover);
+}
+
+/* Autocomplete dropdown */
+.autocomplete-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  margin-top: 4px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  max-height: 180px;
+  overflow-y: auto;
+  z-index: 60;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.autocomplete-item {
+  padding: 10px 14px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.autocomplete-item:hover,
+.autocomplete-item.active {
+  background: var(--bg-input);
+}
+
+.autocomplete-item strong {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.autocomplete-dropdown::-webkit-scrollbar {
+  width: 6px;
+}
+
+.autocomplete-dropdown::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.autocomplete-dropdown::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
 }
 
 /* ==========================================================================

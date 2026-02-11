@@ -28,6 +28,11 @@ reservering:
     - 2
   duur_minuten: 60
 medespelers:
+  bekende_spelers:
+    - Ruud van Erp
+    - Rick Maat
+    - Ron Spaans
+    - Eric-jan Verdaasdonk
   standaard_spelers:
     - Ruud van Erp
     - Rick Maat
