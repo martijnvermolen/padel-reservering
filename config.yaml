@@ -1,6 +1,6 @@
 # =============================================================================
 # Configuratie voor automatische padelbaan reservering - TPV Heksenwiel
-# Bijgewerkt via het dashboard op 11-2-2026, 16:32:23
+# Bijgewerkt via het dashboard op 11-2-2026, 16:32:46
 # =============================================================================
 
 credentials:
@@ -12,6 +12,9 @@ reservering:
     - dag: 1
       tijden:
         - "20:30"
+        - "21:30"
+    - dag: 3
+      tijden:
         - "21:30"
     - dag: 6
       tijden:
@@ -34,6 +37,10 @@ medespelers:
       - Ruud van Erp
       - Rick Maat
       - Ron Spaans
+    "3":
+      - Ruud van Erp
+      - Rick Maat
+      - Eric-jan Verdaasdonk
     "6":
       - Ruud van Erp
       - Rick Maat
