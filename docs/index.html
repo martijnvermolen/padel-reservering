@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#1a1a2e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Padel Reservering - TPV Heksenwiel</title>
+  <link rel="manifest" href="manifest.json">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎾</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Setup overlay (shown when no token is configured) -->
+  <div id="setup-overlay" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>Welkom</h2>
+      <p>Voer je GitHub Personal Access Token in om te beginnen. Dit token wordt alleen lokaal op je telefoon opgeslagen.</p>
+      <p class="hint">Maak een token aan op <a href="https://github.com/settings/tokens/new?scopes=repo,workflow&description=Padel+Dashboard" target="_blank" rel="noopener">github.com/settings/tokens</a> met <code>repo</code> en <code>workflow</code> scopes.</p>
+      <div class="form-group">
+        <label for="setup-token">Personal Access Token</label>
+        <input type="password" id="setup-token" placeholder="ghp_xxxxxxxxxxxx">
+      </div>
+      <div class="form-group">
+        <label for="setup-repo">Repository (owner/name)</label>
+        <input type="text" id="setup-repo" value="martijnvermolen/padel-reservering" placeholder="owner/repo">
+      </div>
+      <button id="setup-save" class="btn btn-primary btn-full">Verbinden</button>
+      <p id="setup-error" class="error-text hidden"></p>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <header>
+    <div class="header-content">
+      <h1>Padel Reservering</h1>
+      <p class="subtitle">TPV Heksenwiel</p>
+    </div>
+    <button id="btn-settings" class="btn-icon" title="Instellingen" aria-label="Instellingen">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </header>
+
+  <main>
+    <!-- Loading state -->
+    <div id="loading" class="loading">
+      <div class="spinner"></div>
+      <p>Configuratie laden...</p>
+    </div>
+
+    <!-- Status section -->
+    <section id="section-status" class="section hidden">
+      <h2>Status</h2>
+      <div id="workflow-runs" class="runs-container">
+        <!-- Filled by JS -->
+      </div>
+      <button id="btn-trigger" class="btn btn-accent btn-full">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Nu reserveren
+      </button>
+    </section>
+
+    <!-- Days section -->
+    <section id="section-dagen" class="section hidden">
+      <h2>Reserveringen</h2>
+      <div id="dagen-container">
+        <!-- Day cards rendered by JS -->
+      </div>
+      <button id="btn-add-dag" class="btn btn-outline btn-full">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Dag toevoegen
+      </button>
+    </section>
+
+    <!-- Save bar -->
+    <div id="save-bar" class="save-bar hidden">
+      <span id="save-status">Niet-opgeslagen wijzigingen</span>
+      <button id="btn-save" class="btn btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+        Opslaan
+      </button>
+    </div>
+  </main>
+
+  <!-- Add day modal -->
+  <div id="modal-add-dag" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>Dag toevoegen</h2>
+      <div class="form-group">
+        <label for="new-dag-select">Dag</label>
+        <select id="new-dag-select">
+          <option value="0">Maandag</option>
+          <option value="1">Dinsdag</option>
+          <option value="2">Woensdag</option>
+          <option value="3">Donderdag</option>
+          <option value="4">Vrijdag</option>
+          <option value="5">Zaterdag</option>
+          <option value="6">Zondag</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label for="new-dag-tijd">Eerste tijdstip</label>
+        <input type="time" id="new-dag-tijd" value="20:00">
+      </div>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn btn-outline">Annuleren</button>
+        <button id="modal-confirm" class="btn btn-primary">Toevoegen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings panel -->
+  <div id="settings-panel" class="overlay hidden">
+    <div class="overlay-content">
+      <h2>Instellingen</h2>
+      <div class="form-group">
+        <label for="settings-token">GitHub Token</label>
+        <input type="password" id="settings-token" placeholder="ghp_xxxxxxxxxxxx">
+      </div>
+      <div class="form-group">
+        <label for="settings-repo">Repository</label>
+        <input type="text" id="settings-repo" placeholder="owner/repo">
+      </div>
+      <div class="form-group">
+        <label for="settings-baan">Baanvoorkeur (nummers, komma-gescheiden)</label>
+        <input type="text" id="settings-baan" placeholder="1, 2">
+      </div>
+      <div class="form-group">
+        <label for="settings-email">Notificatie e-mail</label>
+        <input type="email" id="settings-email" placeholder="je@email.com">
+      </div>
+      <div class="modal-actions">
+        <button id="settings-cancel" class="btn btn-outline">Annuleren</button>
+        <button id="settings-save" class="btn btn-primary">Opslaan</button>
+      </div>
+      <hr>
+      <button id="settings-logout" class="btn btn-danger btn-full">Uitloggen (token verwijderen)</button>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

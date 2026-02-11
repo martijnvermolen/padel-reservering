@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#1a1a2e"/>
+  <circle cx="256" cy="220" r="120" fill="none" stroke="#00b4d8" stroke-width="16"/>
+  <line x1="196" y1="160" x2="316" y2="280" stroke="#00b4d8" stroke-width="12" stroke-linecap="round"/>
+  <line x1="316" y1="160" x2="196" y2="280" stroke="#00b4d8" stroke-width="12" stroke-linecap="round"/>
+  <rect x="232" y="340" width="48" height="100" rx="8" fill="#00b4d8"/>
+  <text x="256" y="476" text-anchor="middle" fill="#e8e8f0" font-family="sans-serif" font-size="36" font-weight="bold">PADEL</text>
+</svg>
