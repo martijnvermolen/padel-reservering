@@ -80,62 +80,40 @@ def load_config() -> dict:
     return config
 
 
-def bepaal_automatische_dag(config: dict) -> dict | None:
+def vind_reserveerbare_dagen(config: dict) -> list[dict]:
     """
-    Bepaal automatisch welke dag gereserveerd moet worden op basis van het
-    huidige tijdstip en de 48-uur reserveringsregel.
+    Vind alle geconfigureerde dagen waarvan de eerstvolgende datum
+    binnen het 48-uur reserveringsvenster valt.
 
-    Logica: Het script draait ~5 minuten voor de 48u-grens.
-    Als het nu zondag 20:25 is, dan is 48u later = dinsdag 20:25.
-    Dat betekent dat we dinsdag 20:30 willen reserveren.
+    Werkt zowel voor geplande cron-runs als handmatige triggers:
+    doorloopt alle dagen uit de config en controleert of ze nu
+    reserveerbaar zijn.
 
     Returns:
-        De dag_config dict die nu aan de beurt is, of None.
+        Lijst van dag_config dicts die nu reserveerbaar zijn (kan leeg zijn).
     """
     logger = logging.getLogger(__name__)
     nu = datetime.now()
     uren_vooruit = config.get("reservering", {}).get("uren_vooruit", 48)
     dagen_config = config.get("reservering", {}).get("dagen", [])
+    reserveerbaar = []
 
-    logger.info(f"Automatische dagbepaling - huidig tijdstip: {nu.strftime('%A %d-%m-%Y %H:%M')}")
-
-    # Bereken het tijdstip dat over ~48 uur valt (met wat marge)
-    # We nemen aan dat dit script ~5 min voor de 48u-grens draait
-    target_moment = nu + timedelta(hours=uren_vooruit, minutes=VOORBEREIDING_MIN)
-    target_weekdag = target_moment.weekday()  # 0=ma, 6=zo
-
-    logger.info(f"Doeltijdstip (nu + {uren_vooruit}u + {VOORBEREIDING_MIN}m): "
-                f"{target_moment.strftime('%A %d-%m-%Y %H:%M')} (weekdag={target_weekdag})")
+    logger.info(f"Zoek reserveerbare dagen - huidig tijdstip: {nu.strftime('%A %d-%m-%Y %H:%M')}")
 
     for dag_config in dagen_config:
-        if dag_config["dag"] == target_weekdag:
-            # Controleer of de eerste voorkeurstijd in de buurt ligt
+        dag = dag_config["dag"]
+        dagnaam = DAGNAMEN.get(dag, str(dag))
+        target = bereken_target_datum(dag_config, uren_vooruit)
+
+        if target is not None:
             eerste_tijd = dag_config.get("tijden", ["19:00"])[0]
-            try:
-                uur, minuut = map(int, eerste_tijd.split(":"))
-                reserveer_moment = target_moment.replace(hour=uur, minute=minuut, second=0)
-                verschil_min = abs((target_moment - reserveer_moment).total_seconds() / 60)
+            logger.info(f"  {dagnaam} {target.strftime('%d-%m-%Y')} {eerste_tijd} -> RESERVEERBAAR")
+            reserveerbaar.append(dag_config)
+        else:
+            logger.debug(f"  {dagnaam} -> buiten 48u venster")
 
-                # Als het verschil minder dan 30 minuten is, is dit de juiste dag
-                if verschil_min <= 30:
-                    logger.info(f"Match gevonden: {DAGNAMEN[dag_config['dag']]} {eerste_tijd} "
-                                f"(verschil: {verschil_min:.0f} min)")
-                    return dag_config
-                else:
-                    logger.debug(f"Dag {DAGNAMEN[dag_config['dag']]} {eerste_tijd} - "
-                                 f"verschil te groot: {verschil_min:.0f} min")
-            except ValueError:
-                pass
-
-    # Fallback: probeer de dag die het dichtst bij het target moment ligt
-    logger.warning("Geen exacte match gevonden, probeer dichtstbijzijnde dag...")
-    for dag_config in dagen_config:
-        if dag_config["dag"] == target_weekdag:
-            logger.info(f"Fallback match: {DAGNAMEN[dag_config['dag']]}")
-            return dag_config
-
-    logger.warning("Geen passende dag gevonden voor automatische reservering")
-    return None
+    logger.info(f"Gevonden: {len(reserveerbaar)} reserveerbare dag(en)")
+    return reserveerbaar
 
 
 def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None:
@@ -171,8 +149,10 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None
     except (ValueError, IndexError):
         target_met_tijd = target.replace(hour=19, minute=0)
 
-    # Iets ruimere controle: we starten 5 min voor de grens
-    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=VOORBEREIDING_MIN + 5)
+    # Ruime controle: tot 1 uur voorbij de 48u-grens accepteren
+    # Dit zorgt dat handmatige triggers ook werken als je net iets
+    # voor of na de exacte 48u-grens zit
+    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=60)
     if target_met_tijd > max_tijdstip:
         return None
 
@@ -435,60 +415,65 @@ def main():
     # Bepaal welke dag(en) we moeten reserveren
     if args.dag is not None:
         # Specifieke dag opgegeven via command line
-        dagen_config = config.get("reservering", {}).get("dagen", [])
-        dag_config_lijst = [d for d in dagen_config if d["dag"] == args.dag]
-        if not dag_config_lijst:
+        alle_dagen = config.get("reservering", {}).get("dagen", [])
+        te_reserveren = [d for d in alle_dagen if d["dag"] == args.dag]
+        if not te_reserveren:
             logger.error(f"Dag {args.dag} ({DAGNAMEN.get(args.dag, '?')}) "
                          f"niet geconfigureerd in config.yaml")
             sys.exit(1)
-        dag_config = dag_config_lijst[0]
     else:
-        # Automatisch bepalen welke dag aan de beurt is
-        dag_config = bepaal_automatische_dag(config)
-        if dag_config is None:
-            logger.error("Kon niet automatisch bepalen welke dag gereserveerd moet worden. "
-                         "Gebruik --dag <nummer> om de dag handmatig op te geven.")
+        # Automatisch: vind alle dagen die nu binnen het 48u-venster vallen
+        te_reserveren = vind_reserveerbare_dagen(config)
+        if not te_reserveren:
+            logger.error("Geen reserveerbare dagen gevonden binnen het 48-uur venster. "
+                         "Gebruik --dag <nummer> om een specifieke dag te forceren.")
             sys.exit(1)
-
-    dagnaam = DAGNAMEN.get(dag_config["dag"], str(dag_config["dag"]))
-    logger.info(f"Reservering voor: {dagnaam}")
 
     # E-mail notifier
     email_config = config.get("email", {})
     notifier = EmailNotifier(email_config)
 
-    # Voer de reservering uit
-    if args.no_retry:
-        result = reserveer_voor_dag(config, dag_config, dry_run=args.dry_run)
-    else:
-        result = reserveer_met_retry(config, dag_config, dry_run=args.dry_run)
+    # Voer reserveringen uit voor alle gevonden dagen
+    resultaten = []
+    for dag_config in te_reserveren:
+        dagnaam = DAGNAMEN.get(dag_config["dag"], str(dag_config["dag"]))
+        logger.info(f"\n--- Reservering voor: {dagnaam} ---")
 
-    # Verstuur notificatie
-    if not args.dry_run:
-        notifier.verstuur(result)
-    else:
-        logger.info("DRY RUN - Geen e-mail verstuurd")
+        if args.no_retry:
+            result = reserveer_voor_dag(config, dag_config, dry_run=args.dry_run)
+        else:
+            result = reserveer_met_retry(config, dag_config, dry_run=args.dry_run)
 
-    # Log resultaat
-    if result["success"]:
-        logger.info(f"SUCCES: {dagnaam} {result['datum']} om {result['tijd']} "
-                     f"op baan {result['baan']}")
-    else:
-        logger.warning(f"MISLUKT: {dagnaam} - {result.get('foutmelding', 'onbekende fout')}")
+        resultaten.append(result)
+
+        # Verstuur notificatie per reservering
+        if not args.dry_run:
+            notifier.verstuur(result)
+        else:
+            logger.info("DRY RUN - Geen e-mail verstuurd")
+
+        if result["success"]:
+            logger.info(f"SUCCES: {dagnaam} {result['datum']} om {result['tijd']} "
+                         f"op baan {result['baan']}")
+        else:
+            logger.warning(f"MISLUKT: {dagnaam} - {result.get('foutmelding', 'onbekende fout')}")
 
     # Samenvatting
+    logger.info("\n" + "=" * 60)
+    logger.info("SAMENVATTING")
     logger.info("=" * 60)
-    status = "GELUKT" if result["success"] else "MISLUKT"
-    logger.info(f"RESULTAAT: {status}")
-    logger.info(f"  Datum: {result['datum']}")
-    logger.info(f"  Tijd: {result.get('tijd', '-')}")
-    logger.info(f"  Baan: {result.get('baan', '-')}")
-    logger.info(f"  Spelers: {result.get('spelers', [])}")
-    if result.get("foutmelding"):
-        logger.info(f"  Melding: {result['foutmelding']}")
+    geslaagd = sum(1 for r in resultaten if r["success"])
+    mislukt = len(resultaten) - geslaagd
+    logger.info(f"Totaal: {len(resultaten)} | Geslaagd: {geslaagd} | Mislukt: {mislukt}")
+
+    for result in resultaten:
+        status = "OK" if result["success"] else "FOUT"
+        logger.info(f"  [{status}] {result['datum']} {result.get('tijd', '-')} "
+                     f"- {result.get('foutmelding') or 'Gelukt'}")
+
     logger.info("=" * 60)
 
-    sys.exit(0 if result["success"] else 1)
+    sys.exit(0 if mislukt == 0 else 1)
 
 
 if __name__ == "__main__":
