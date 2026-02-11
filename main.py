@@ -210,7 +210,7 @@ def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: i
         logger.info(f"Reserveringsvenster is al open (sinds {abs(wachttijd):.0f}s geleden)")
 
 
-def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False) -> dict:
+def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, verbose: bool = False) -> dict:
     """
     Voer een reservering uit met retry-loop.
 
@@ -252,7 +252,7 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False) -
         "foutmelding": None,
     }
 
-    bot = ReserveringBot(config)
+    bot = ReserveringBot(config, verbose_screenshots=verbose)
     try:
         # --- FASE 1: VOORBEREIDING (voor de 48u-grens) ---
         logger.info("--- FASE 1: Voorbereiding (login + stap 1 + stap 2) ---")
@@ -322,7 +322,7 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False) -
     return result
 
 
-def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False) -> dict:
+def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False, verbose: bool = False) -> dict:
     """
     Voer een reservering uit voor een specifieke dag (zonder retry, voor lokaal testen).
     """
@@ -346,7 +346,7 @@ def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False) ->
     logger.info(f"=== Reservering voor {dagnaam} {target_date.strftime('%d-%m-%Y')} ===")
     logger.info(f"Voorkeurtijden: {tijden} | Medespelers: {spelers}")
 
-    bot = ReserveringBot(config)
+    bot = ReserveringBot(config, verbose_screenshots=verbose)
     try:
         bot.start()
         result = bot.reserveer(
@@ -448,9 +448,9 @@ def main():
         logger.info(f"\n--- Reservering voor: {dagnaam} ---")
 
         if args.no_retry:
-            result = reserveer_voor_dag(config, dag_config, dry_run=args.dry_run)
+            result = reserveer_voor_dag(config, dag_config, dry_run=args.dry_run, verbose=args.verbose)
         else:
-            result = reserveer_met_retry(config, dag_config, dry_run=args.dry_run)
+            result = reserveer_met_retry(config, dag_config, dry_run=args.dry_run, verbose=args.verbose)
 
         resultaten.append(result)
 

@@ -27,29 +27,32 @@ class ReserveringError(Exception):
 class ReserveringBot:
     """Automatische padelbaan reservering via KNLTB.site."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, verbose_screenshots: bool = False):
         self.config = config
         self.browser: Browser | None = None
         self.page: Page | None = None
         self.playwright = None
+        self.verbose_screenshots = verbose_screenshots
         self._ensure_screenshots_dir()
 
     def _ensure_screenshots_dir(self):
         """Maak screenshots directory aan als die niet bestaat."""
         SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
-    def _screenshot(self, name: str):
-        """Maak een screenshot voor debugging."""
-        if self.page:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            # Vervang ongeldige tekens in bestandsnaam (bijv. : uit tijden)
-            safe_name = name.replace(":", "-").replace(" ", "_")
-            path = SCREENSHOTS_DIR / f"{timestamp}_{safe_name}.png"
-            try:
-                self.page.screenshot(path=str(path), full_page=True)
-                logger.debug(f"Screenshot opgeslagen: {path}")
-            except Exception as e:
-                logger.warning(f"Kon screenshot niet maken: {e}")
+    def _screenshot(self, name: str, force: bool = False):
+        """Maak een screenshot. Alleen bij fouten of force=True, tenzij verbose_screenshots aan staat."""
+        if not self.page:
+            return
+        if not force and not self.verbose_screenshots:
+            return
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe_name = name.replace(":", "-").replace(" ", "_")
+        path = SCREENSHOTS_DIR / f"{timestamp}_{safe_name}.png"
+        try:
+            self.page.screenshot(path=str(path), full_page=True)
+            logger.debug(f"Screenshot opgeslagen: {path}")
+        except Exception as e:
+            logger.warning(f"Kon screenshot niet maken: {e}")
 
     def start(self):
         """Start de browser."""
@@ -111,7 +114,8 @@ class ReserveringBot:
         logger.info(f"Inloggen met {login_type}: {username}")
 
         try:
-            self.page.goto(urls["login"], wait_until="networkidle")
+            self.page.goto(urls["login"], wait_until="domcontentloaded")
+            self.page.wait_for_load_state("networkidle", timeout=10000)
             self._screenshot("01_login_pagina")
 
             # Selecteer login type als nodig
@@ -119,7 +123,7 @@ class ReserveringBot:
                 clubnr_option = self.page.locator("text=Clublidnummer")
                 if clubnr_option.is_visible():
                     clubnr_option.click()
-                    self.page.wait_for_timeout(500)
+                    self.page.wait_for_timeout(300)
 
             # Vul gebruikersnaam in
             username_field = self.page.locator(
@@ -144,8 +148,7 @@ class ReserveringBot:
             ).first
             login_button.click()
 
-            self.page.wait_for_load_state("networkidle")
-            self.page.wait_for_timeout(2000)
+            self.page.wait_for_load_state("networkidle", timeout=10000)
             self._screenshot("03_na_login")
 
             if self._is_logged_in():
@@ -153,16 +156,16 @@ class ReserveringBot:
                 return True
             else:
                 logger.error("Login mislukt - nog steeds op login pagina")
-                self._screenshot("03_login_mislukt")
+                self._screenshot("03_login_mislukt", force=True)
                 return False
 
         except PlaywrightTimeout as e:
             logger.error(f"Timeout tijdens inloggen: {e}")
-            self._screenshot("03_login_timeout")
+            self._screenshot("03_login_timeout", force=True)
             return False
         except Exception as e:
             logger.error(f"Fout tijdens inloggen: {e}")
-            self._screenshot("03_login_fout")
+            self._screenshot("03_login_fout", force=True)
             raise ReserveringError(f"Login mislukt: {e}")
 
     def _is_logged_in(self) -> bool:
@@ -180,8 +183,8 @@ class ReserveringBot:
         logger.info("Navigeren naar reserveringspagina...")
 
         try:
-            self.page.goto(urls["reservering"], wait_until="networkidle")
-            self.page.wait_for_timeout(2000)
+            self.page.goto(urls["reservering"], wait_until="domcontentloaded")
+            self.page.wait_for_load_state("networkidle", timeout=10000)
             self._screenshot("04_reservering_pagina")
 
             # Controleer of we op stap 1 (Partners kiezen) zijn
@@ -197,8 +200,7 @@ class ReserveringBot:
             ).first
             if baan_tab.is_visible():
                 baan_tab.click()
-                self.page.wait_for_load_state("networkidle")
-                self.page.wait_for_timeout(2000)
+                self.page.wait_for_load_state("networkidle", timeout=10000)
                 self._screenshot("04b_baan_tab_geklikt")
 
             logger.info(f"Huidige URL: {self.page.url}")
@@ -206,7 +208,7 @@ class ReserveringBot:
 
         except Exception as e:
             logger.error(f"Fout bij navigatie: {e}")
-            self._screenshot("04_navigatie_fout")
+            self._screenshot("04_navigatie_fout", force=True)
             return False
 
     # =========================================================================
@@ -278,14 +280,14 @@ class ReserveringBot:
 
             if plus_button.count() > 0 and plus_button.first.is_visible():
                 plus_button.first.click()
-                self.page.wait_for_timeout(800)
+                self.page.wait_for_timeout(300)
                 logger.info(f"Speler '{speler}' toegevoegd via Recent mee gespeeld (+)")
                 return True
 
             # Probeer het hele parent element te klikken (de kaart zelf)
             try:
                 parent.click()
-                self.page.wait_for_timeout(800)
+                self.page.wait_for_timeout(300)
                 logger.info(f"Speler '{speler}' toegevoegd via klik op kaart")
                 return True
             except Exception:
@@ -298,7 +300,7 @@ class ReserveringBot:
                 parent = recent_achternaam.first.locator("xpath=..")
                 try:
                     parent.click()
-                    self.page.wait_for_timeout(800)
+                    self.page.wait_for_timeout(300)
                     logger.info(f"Speler '{speler}' toegevoegd via achternaam '{achternaam}'")
                     return True
                 except Exception:
@@ -319,7 +321,7 @@ class ReserveringBot:
 
         if search_field.is_visible():
             search_field.fill(speler)
-            self.page.wait_for_timeout(1500)
+            self.page.wait_for_timeout(500)
 
             # Klik op het zoekresultaat
             result = self.page.locator(
@@ -331,12 +333,12 @@ class ReserveringBot:
 
             if result.is_visible():
                 result.click()
-                self.page.wait_for_timeout(800)
+                self.page.wait_for_timeout(300)
                 logger.info(f"Speler '{speler}' toegevoegd via zoekbalk")
                 return True
 
         logger.warning(f"Speler '{speler}' kon niet worden toegevoegd")
-        self._screenshot(f"05_speler_niet_gevonden_{achternaam}")
+        self._screenshot(f"05_speler_niet_gevonden_{achternaam}", force=True)
         return False
 
     # =========================================================================
@@ -387,7 +389,7 @@ class ReserveringBot:
         """
         logger.info(f"Stap 2: Kies een dag - {target_date.strftime('%A %d-%m-%Y')}")
 
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(300)
         self._screenshot("06_stap2_kies_dag")
 
         # Bepaal dag-afkorting en nummer zoals op de pagina getoond
@@ -423,7 +425,7 @@ class ReserveringBot:
                     if dagdeel_element.is_visible():
                         # Gebruik force=True om intercepted clicks te omzeilen
                         dagdeel_element.click(force=True)
-                        self.page.wait_for_timeout(1500)
+                        self.page.wait_for_timeout(500)
                         self._screenshot("06b_dagdeel_geselecteerd")
                         logger.info(f"Dagdeel '{dagdeel}' geselecteerd bij '{dag_label}'")
 
@@ -443,7 +445,7 @@ class ReserveringBot:
                             alt_element = column.locator(f"text='{alt_dagdeel}'").first
                             if alt_element.is_visible():
                                 alt_element.click(force=True)
-                                self.page.wait_for_timeout(1500)
+                                self.page.wait_for_timeout(500)
                                 self._screenshot(f"06b_{alt_dagdeel}_geselecteerd")
                                 logger.info(f"Alternatief dagdeel '{alt_dagdeel}' geselecteerd")
                                 volgende = self.page.locator(
@@ -460,18 +462,18 @@ class ReserveringBot:
             ).last  # De ">" knop naast de weekrange
             if next_week_btn.is_visible():
                 next_week_btn.click()
-                self.page.wait_for_timeout(2000)
+                self.page.wait_for_timeout(500)
                 self._screenshot("06c_volgende_week")
                 # Recursief opnieuw proberen (1 keer)
                 return self._selecteer_dagdeel_in_week(dag_label, dagdeel)
 
             logger.error(f"Kon dag '{dag_label}' met dagdeel '{dagdeel}' niet vinden")
-            self._screenshot("06_dag_niet_gevonden")
+            self._screenshot("06_dag_niet_gevonden", force=True)
             return False
 
         except Exception as e:
             logger.error(f"Fout bij dag selectie: {e}")
-            self._screenshot("06_dag_fout")
+            self._screenshot("06_dag_fout", force=True)
             return False
 
     def _selecteer_dagdeel_in_week(self, dag_label: str, dagdeel: str) -> bool:
@@ -485,7 +487,7 @@ class ReserveringBot:
                 dagdeel_element = column.locator(f"text='{dagdeel}'").first
                 if dagdeel_element.is_visible():
                     dagdeel_element.click(force=True)
-                    self.page.wait_for_timeout(1500)
+                    self.page.wait_for_timeout(500)
                     self._screenshot("06d_dagdeel_gevonden")
                     logger.info(f"Dagdeel '{dagdeel}' gevonden in volgende week")
                     volgende = self.page.locator(
@@ -522,7 +524,7 @@ class ReserveringBot:
         """
         logger.info(f"Stap 3: Kies een baan - tijden: {tijden}, voorkeur: {baan_voorkeur}")
 
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(300)
         self._screenshot("07_stap3_kies_baan")
 
         try:
@@ -641,12 +643,12 @@ class ReserveringBot:
                     return {"tijd": slot["tijd"], "baan": slot["baan"]}
 
             logger.error("Geen beschikbaar tijdslot gevonden")
-            self._screenshot("07_geen_slots")
+            self._screenshot("07_geen_slots", force=True)
             return None
 
         except Exception as e:
             logger.error(f"Fout bij baan selectie: {e}")
-            self._screenshot("07_baan_fout")
+            self._screenshot("07_baan_fout", force=True)
             return None
 
     def _extract_baan_nummer(self, baan_naam: str) -> int | None:
@@ -738,20 +740,16 @@ class ReserveringBot:
 
         if not marked:
             logger.error(f"Kon tijdslot {tijd} niet vinden op de pagina")
-            self._screenshot("07_klik_niet_gevonden")
+            self._screenshot("07_klik_niet_gevonden", force=True)
             return
 
         # Stap 2: Klik via Playwright (triggert alle event handlers correct)
         target = self.page.locator("[data-bot-target='true']").first
         if target.is_visible():
             target.click()
-            self.page.wait_for_timeout(2000)
+            self.page.wait_for_timeout(500)
             self._screenshot(f"07b_{tijd}_geklikt")
             logger.info(f"Tijdslot {tijd} aangeklikt via Playwright")
-
-            # Controleer of er een selectie is gemaakt (visuele feedback)
-            # Wacht even en maak screenshot
-            self._screenshot(f"07c_{tijd}_na_klik")
 
             # Klik Volgende als die er is
             volgende = self.page.locator(
@@ -761,7 +759,7 @@ class ReserveringBot:
                 self._klik_volgende("stap3")
         else:
             logger.error(f"Gemarkeerd element voor {tijd} is niet zichtbaar")
-            self._screenshot("07_target_niet_zichtbaar")
+            self._screenshot("07_target_niet_zichtbaar", force=True)
 
     # =========================================================================
     # STAP 4: BEVESTIGEN
@@ -779,7 +777,7 @@ class ReserveringBot:
         """
         logger.info(f"Stap 4: Bevestigen (dry_run={dry_run})")
 
-        self.page.wait_for_timeout(1000)
+        self.page.wait_for_timeout(300)
         self._screenshot("08_stap4_bevestigen")
 
         if dry_run:
@@ -802,18 +800,27 @@ class ReserveringBot:
                 button = self.page.locator(selector).first
                 if button.is_visible() and button.is_enabled():
                     logger.info(f"Bevestigingsknop gevonden: {selector}")
+                    pre_url = self.page.url
                     button.click()
-                    self.page.wait_for_timeout(3000)
-                    self._screenshot("08b_na_bevestiging")
+                    # Wacht op pagina-update: eerst snel domcontentloaded,
+                    # dan kort wachten op eventuele redirect/content-update
+                    try:
+                        self.page.wait_for_load_state("networkidle", timeout=5000)
+                    except PlaywrightTimeout:
+                        pass
+                    # Extra korte wacht als URL niet veranderd is
+                    if self.page.url == pre_url:
+                        self.page.wait_for_timeout(500)
+                    self._screenshot("08b_na_bevestiging", force=True)
                     return self._check_bevestiging()
 
             logger.error("Geen bevestigingsknop gevonden")
-            self._screenshot("08_geen_bevestigingsknop")
+            self._screenshot("08_geen_bevestigingsknop", force=True)
             return False
 
         except Exception as e:
             logger.error(f"Fout bij bevestiging: {e}")
-            self._screenshot("08_bevestiging_fout")
+            self._screenshot("08_bevestiging_fout", force=True)
             return False
 
     # =========================================================================
@@ -831,14 +838,14 @@ class ReserveringBot:
 
             if volgende_btn.is_visible() and volgende_btn.is_enabled():
                 volgende_btn.click()
-                self.page.wait_for_load_state("networkidle")
-                self.page.wait_for_timeout(2000)
+                self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+                self.page.wait_for_timeout(500)
                 self._screenshot(f"{stap_naam}_na_volgende")
                 logger.info(f"Doorgegaan naar volgende stap ({stap_naam})")
                 return True
             else:
                 logger.warning(f"'Volgende' knop niet zichtbaar of niet klikbaar ({stap_naam})")
-                self._screenshot(f"{stap_naam}_volgende_niet_gevonden")
+                self._screenshot(f"{stap_naam}_volgende_niet_gevonden", force=True)
                 return False
         except Exception as e:
             logger.error(f"Fout bij klikken op Volgende ({stap_naam}): {e}")
@@ -1002,7 +1009,7 @@ class ReserveringBot:
             result["retry"] = True
             logger.error(f"Fout bij reserveerpoging: {e}")
 
-        self._screenshot("poging_resultaat")
+        self._screenshot("poging_resultaat", force=True)
         return result
 
     def reserveer(
@@ -1045,6 +1052,6 @@ class ReserveringBot:
             result["foutmelding"] = f"Onverwachte fout: {e}"
             logger.error(f"Onverwachte fout: {e}", exc_info=True)
         finally:
-            self._screenshot("09_eindresultaat")
+            self._screenshot("09_eindresultaat", force=True)
 
         return result
