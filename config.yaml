@@ -1,79 +1,55 @@
 # =============================================================================
 # Configuratie voor automatische padelbaan reservering - TPV Heksenwiel
+# Bijgewerkt via het dashboard op 11-2-2026, 16:32:23
 # =============================================================================
 
-# --- Inloggegevens ---
-# Vul je bondsnummer of clublidnummer in.
-# Het wachtwoord wordt gelezen uit de environment variable KNLTB_PASSWORD.
-# Je kunt het ook hier invullen (minder veilig), dan wordt de env variable genegeerd.
 credentials:
-  login_type: "bondsnummer"        # "bondsnummer" of "clublidnummer"
-  username: ""                     # Laat leeg om KNLTB_USERNAME env variable te gebruiken
-  password: ""                     # Laat leeg om KNLTB_PASSWORD env variable te gebruiken
-
-# --- Reserveringsvoorkeuren ---
+  login_type: bondsnummer
+  username: ""
+  password: ""
 reservering:
-  # Welke dag(en) wil je spelen? (maandag=0, dinsdag=1, woensdag=2, donderdag=3, vrijdag=4, zaterdag=5, zondag=6)
   dagen:
-    - dag: 1          # dinsdag
+    - dag: 1
       tijden:
         - "20:30"
-        - "21:30"     # fallback tijd
-    - dag: 6          # zondag
+        - "21:30"
+    - dag: 6
       tijden:
         - "19:30"
-        - "20:30"     # fallback tijd
-
-  # Hoeveel uur van tevoren mag je reserveren? (48 uur bij TPV Heksenwiel)
+        - "20:30"
   uren_vooruit: 48
-
-  # Voorkeursbanen (padelbaan nummers, in volgorde van voorkeur)
-  # Laat leeg om de eerste beschikbare baan te pakken
-  baan_voorkeur: [1, 3, 4, 2]
-
-  # Duur van de reservering in minuten
+  baan_voorkeur:
+    - 1
+    - 3
+    - 4
+    - 2
   duur_minuten: 60
-
-# --- Medespelers ---
-# Voeg hier de namen toe van je vaste medespelers zoals ze in het KNLTB-systeem staan.
-# Per reserveringsdag kun je verschillende spelers opgeven.
-# Als "spelers_per_dag" leeg is, worden "standaard_spelers" gebruikt.
 medespelers:
   standaard_spelers:
-    - "Ruud van Erp"
-    - "Rick Maat"
-    - "Ron Spaans"
-
-  # Specifieke spelers per dag (overschrijft standaard_spelers)
+    - Ruud van Erp
+    - Rick Maat
+    - Ron Spaans
   spelers_per_dag:
-    1:  # dinsdag: Martijn (ingelogd) + Ruud, Rick, Ron
-      - "Ruud van Erp"
-      - "Rick Maat"
-      - "Ron Spaans"
-    6:  # zondag: Martijn (ingelogd) + Ruud, Rick, Erik-Jan
-      - "Ruud van Erp"
-      - "Rick Maat"
-      - "Eric-jan Verdaasdonk"
-
-# --- E-mail notificaties ---
+    "1":
+      - Ruud van Erp
+      - Rick Maat
+      - Ron Spaans
+    "6":
+      - Ruud van Erp
+      - Rick Maat
+      - Eric-jan Verdaasdonk
 email:
   enabled: true
-  smtp_server: "smtp.gmail.com"     # SMTP server (gmail, outlook, etc.)
-  smtp_port: 587                     # 587 voor TLS, 465 voor SSL
+  smtp_server: smtp.gmail.com
+  smtp_port: 587
   use_tls: true
-  afzender: "martijn.vermolen85@gmail.com"
-  # Wachtwoord voor e-mail wordt gelezen uit EMAIL_PASSWORD env variable.
-  # Voor Gmail: gebruik een App Password (https://myaccount.google.com/apppasswords)
-  afzender_wachtwoord: ""            # Laat leeg om EMAIL_PASSWORD env variable te gebruiken
-  ontvanger: "martijn.vermolen85@gmail.com"  # Waar de notificaties naartoe gaan
-
-# --- URLs ---
+  afzender: martijn.vermolen85@gmail.com
+  afzender_wachtwoord: ""
+  ontvanger: martijn.vermolen85@gmail.com
 urls:
-  login: "https://tpv-heksenwiel.knltb.site/mijn?onlyProfileComponents=True"
-  reservering: "https://tpv-heksenwiel.knltb.site/me/ReservationsPlayers"
-
-# --- Browser instellingen ---
+  login: https://tpv-heksenwiel.knltb.site/mijn?onlyProfileComponents=True
+  reservering: https://tpv-heksenwiel.knltb.site/me/ReservationsPlayers
 browser:
-  headless: true         # true = onzichtbaar op achtergrond, false = browser zichtbaar (handig voor testen)
-  slow_mo: 0             # Vertraging in ms tussen acties (handig voor debuggen, bijv. 500)
-  timeout: 30000         # Maximale wachttijd in ms voor pagina-elementen
+  headless: true
+  slow_mo: 0
+  timeout: 30000
