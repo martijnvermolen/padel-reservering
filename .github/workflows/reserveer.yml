@@ -1,0 +1,58 @@
+name: Padel Reservering
+
+on:
+  schedule:
+    # Cron tijden in UTC. Nederland is UTC+1 (winter) / UTC+2 (zomer).
+    #
+    # Dinsdag 20:30 reserveren -> 48u eerder = zondag 20:30
+    #   Start 5 min eerder: zondag 20:25 NL = zondag 19:25 UTC (winter) / 18:25 UTC (zomer)
+    - cron: '25 18 * * 0'    # zondag 18:25 UTC -> reserveer dinsdag 20:30
+
+    # Zondag 19:30 reserveren -> 48u eerder = vrijdag 19:30
+    #   Start 5 min eerder: vrijdag 19:25 NL = vrijdag 18:25 UTC (winter) / 17:25 UTC (zomer)
+    - cron: '25 17 * * 5'    # vrijdag 17:25 UTC -> reserveer zondag 19:30
+
+  workflow_dispatch:            # Handmatig triggeren mogelijk via GitHub UI
+
+jobs:
+  reserveer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15         # Maximale runtime inclusief retry-loop
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Installeer dependencies
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Reserveer padelbaan
+        env:
+          KNLTB_USERNAME: ${{ secrets.KNLTB_USERNAME }}
+          KNLTB_PASSWORD: ${{ secrets.KNLTB_PASSWORD }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+        run: python main.py --verbose
+
+      - name: Upload screenshots
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshots-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 7
+
+      - name: Upload logfile
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reservering-log-${{ github.run_id }}
+          path: reservering.log
+          retention-days: 7

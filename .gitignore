@@ -1,0 +1,23 @@
+# Screenshots en logs
+screenshots/
+reservering.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Windows Task Scheduler (niet nodig voor cloud)
+setup_scheduler.bat
