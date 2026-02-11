@@ -163,8 +163,13 @@ def get_spelers(config: dict, dag: int) -> list[str]:
     """Haal de lijst met medespelers op voor een specifieke dag."""
     medespelers_config = config.get("medespelers", {})
     spelers_per_dag = medespelers_config.get("spelers_per_dag", {})
-    if spelers_per_dag and dag in spelers_per_dag:
-        return spelers_per_dag[dag]
+    if spelers_per_dag:
+        # YAML keys kunnen int of string zijn afhankelijk van quoting;
+        # controleer beide varianten
+        if dag in spelers_per_dag:
+            return spelers_per_dag[dag]
+        if str(dag) in spelers_per_dag:
+            return spelers_per_dag[str(dag)]
     return medespelers_config.get("standaard_spelers", [])
 
 

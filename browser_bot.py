@@ -860,6 +860,8 @@ class ReserveringBot:
             "fout", "mislukt", "niet beschikbaar",
             "bezet", "al gereserveerd", "niet mogelijk",
             "maak een keuze", "selecteer een",
+            "heeft al een reservering", "already",
+            "kan niet", "niet toegestaan", "maximaal",
         ]
 
         for indicator in success_indicators:
@@ -872,8 +874,11 @@ class ReserveringBot:
                 logger.warning(f"Foutmelding gevonden: '{indicator}'")
                 return False
 
-        logger.info("Geen duidelijke bevestiging gevonden - controleer screenshots")
-        return True
+        # Neem een extra screenshot van de volledige pagina-tekst voor debugging
+        logger.warning("Geen duidelijke bevestiging gevonden - controleer screenshots")
+        logger.debug(f"Pagina tekst (eerste 500 tekens): {page_text[:500]}")
+        # Voorzichtig: als we geen duidelijke bevestiging zien, neem aan dat het NIET gelukt is
+        return False
 
     # =========================================================================
     # HOOFD-FLOW (gesplitst in voorbereiden + probeer_reserveer)
