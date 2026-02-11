@@ -276,7 +276,10 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False) -
             poging_nr += 1
             logger.info(f"--- Poging {poging_nr} ({datetime.now().strftime('%H:%M:%S')}) ---")
 
-            poging = bot.probeer_reserveer(tijden, baan_voorkeur, dry_run)
+            poging = bot.probeer_reserveer(
+                target_date, tijden, spelers, baan_voorkeur, dry_run,
+                is_eerste_poging=(poging_nr == 1),
+            )
 
             if poging["success"]:
                 result["success"] = True

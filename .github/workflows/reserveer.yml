@@ -39,7 +39,14 @@ jobs:
           KNLTB_USERNAME: ${{ secrets.KNLTB_USERNAME }}
           KNLTB_PASSWORD: ${{ secrets.KNLTB_PASSWORD }}
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
-        run: python main.py --verbose
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Handmatige trigger - zonder retry-loop"
+            python main.py --no-retry --verbose
+          else
+            echo "Geplande trigger - met retry-loop"
+            python main.py --verbose
+          fi
 
       - name: Upload screenshots
         uses: actions/upload-artifact@v4

@@ -42,7 +42,9 @@ class ReserveringBot:
         """Maak een screenshot voor debugging."""
         if self.page:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = SCREENSHOTS_DIR / f"{timestamp}_{name}.png"
+            # Vervang ongeldige tekens in bestandsnaam (bijv. : uit tijden)
+            safe_name = name.replace(":", "-").replace(" ", "_")
+            path = SCREENSHOTS_DIR / f"{timestamp}_{safe_name}.png"
             try:
                 self.page.screenshot(path=str(path), full_page=True)
                 logger.debug(f"Screenshot opgeslagen: {path}")
@@ -528,49 +530,45 @@ class ReserveringBot:
             # Zoek alle klikbare tijdslot-elementen en hun bijbehorende baan
             slots_info = self.page.evaluate("""() => {
                 const results = [];
-                // Zoek alle links/knoppen die een tijd bevatten (bijv. "21:30")
                 const timePattern = /^\\d{1,2}:\\d{2}$/;
+                const courtPattern = /(?:Padel|Baan)\\s*\\d+/gi;
                 const allElements = document.querySelectorAll('a, button, [role="button"], span, div');
+
                 for (const el of allElements) {
                     const text = el.textContent.trim();
-                    if (timePattern.test(text) && el.offsetParent !== null) {
-                        // Zoek de baan-naam door omhoog te navigeren in de DOM
-                        let baanNaam = '';
-                        let parent = el.closest('[class*="court"], [class*="row"], tr, [class*="baan"]');
-                        if (!parent) {
-                            // Zoek verder omhoog
-                            parent = el.parentElement;
-                            for (let i = 0; i < 10 && parent; i++) {
-                                const parentText = parent.textContent || '';
-                                if (parentText.toLowerCase().includes('padel') ||
-                                    parentText.toLowerCase().includes('baan')) {
-                                    break;
-                                }
-                                parent = parent.parentElement;
+                    if (!timePattern.test(text) || el.offsetParent === null) continue;
+
+                    // STRATEGIE: Loop omhoog door de DOM en zoek de KLEINSTE container
+                    // die precies 1 uniek baan/court-naam bevat. Dat is de "baan-rij".
+                    let baanNaam = '';
+                    let current = el.parentElement;
+                    for (let depth = 0; depth < 25 && current && current !== document.body; depth++) {
+                        const txt = current.textContent || '';
+
+                        // Zoek alle court-namen in deze container
+                        const courtMatches = txt.match(courtPattern) || [];
+                        const uniqueCourts = [...new Set(courtMatches.map(c => c.toLowerCase().replace(/\\s+/g, ' ').trim()))];
+
+                        if (uniqueCourts.length === 1) {
+                            // Precies 1 unieke baannaam -> dit is de juiste container
+                            const m = courtMatches[0].match(/(?:Padel|Baan)\\s*(\\d+)/i);
+                            if (m) {
+                                const isPadel = courtMatches[0].toLowerCase().includes('padel');
+                                baanNaam = (isPadel ? 'Padel ' : 'Baan ') + m[1];
+                                break;
                             }
                         }
-                        if (parent) {
-                            // Zoek de baan-naam in de buurt
-                            const baanEl = parent.querySelector('[class*="name"], [class*="title"], strong, b, h3, h4');
-                            if (baanEl) {
-                                baanNaam = baanEl.textContent.trim();
-                            }
-                            if (!baanNaam) {
-                                // Neem de eerste tekst die Padel of Baan bevat
-                                const allText = parent.textContent;
-                                const match = allText.match(/(\\d+\\s*Padel\\s*\\d+|\\d+\\s*Baan\\s*\\d+)/i);
-                                if (match) baanNaam = match[1];
-                            }
-                        }
-                        results.push({
-                            tijd: text,
-                            baan: baanNaam,
-                            isPadel: baanNaam.toLowerCase().includes('padel'),
-                            // Maak een unieke selector voor dit element
-                            tagName: el.tagName,
-                            index: Array.from(document.querySelectorAll(el.tagName)).indexOf(el)
-                        });
+
+                        current = current.parentElement;
                     }
+
+                    results.push({
+                        tijd: text,
+                        baan: baanNaam,
+                        isPadel: baanNaam.toLowerCase().includes('padel'),
+                        tagName: el.tagName,
+                        index: Array.from(document.querySelectorAll(el.tagName)).indexOf(el)
+                    });
                 }
                 return results;
             }""")
@@ -581,8 +579,36 @@ class ReserveringBot:
 
             # Filter op padel-banen
             padel_slots = [s for s in slots_info if s["isPadel"]]
-            if not padel_slots:
-                logger.warning("Geen padel-slots gevonden, gebruik alle slots")
+            if not padel_slots and slots_info:
+                # Geen padel-banen herkend - dump pagina-info voor debugging
+                logger.warning("Geen padel-slots gevonden in DOM-analyse")
+                page_debug = self.page.evaluate("""() => {
+                    // Dump alle zichtbare tekst die 'padel' of 'baan' bevat
+                    const info = [];
+                    const allEl = document.querySelectorAll('*');
+                    for (const el of allEl) {
+                        // Alleen directe tekst (niet van kinderen)
+                        const ownText = Array.from(el.childNodes)
+                            .filter(n => n.nodeType === 3)
+                            .map(n => n.textContent.trim())
+                            .filter(t => t.length > 0)
+                            .join(' ');
+                        if (ownText && /padel|baan/i.test(ownText)) {
+                            info.push({
+                                tag: el.tagName,
+                                cls: el.className ? el.className.substring(0, 80) : '',
+                                text: ownText.substring(0, 120)
+                            });
+                        }
+                    }
+                    return info.slice(0, 30);
+                }""")
+                for item in page_debug:
+                    logger.debug(f"  DOM padel/baan: <{item['tag']} class='{item['cls']}'> {item['text']}")
+
+                # Toch alle slots gebruiken als fallback (maar log een duidelijke warning)
+                logger.warning(f"Fallback: gebruik alle {len(slots_info)} slots "
+                               f"(baannamen niet herkend)")
                 padel_slots = slots_info
 
             # Probeer elke voorkeurstijd, per tijd de banen in voorkeursvolgorde
@@ -820,7 +846,10 @@ class ReserveringBot:
 
     def _check_bevestiging(self) -> bool:
         """Controleer of de reservering succesvol is bevestigd."""
-        page_text = (self.page.text_content("body") or "").lower()
+        # Gebruik visible text (niet hidden elements / scripts / class names)
+        page_text = self.page.evaluate("""() => {
+            return document.body.innerText.toLowerCase();
+        }""") or ""
 
         success_indicators = [
             "reservering geplaatst", "reservering bevestigd",
@@ -828,8 +857,9 @@ class ReserveringBot:
             "gelukt", "bevestigd",
         ]
         error_indicators = [
-            "fout", "error", "mislukt", "niet beschikbaar",
+            "fout", "mislukt", "niet beschikbaar",
             "bezet", "al gereserveerd", "niet mogelijk",
+            "maak een keuze", "selecteer een",
         ]
 
         for indicator in success_indicators:
@@ -892,14 +922,18 @@ class ReserveringBot:
 
     def probeer_reserveer(
         self,
+        target_date: datetime,
         tijden: list[str],
+        spelers: list[str],
         baan_voorkeur: list = None,
         dry_run: bool = False,
+        is_eerste_poging: bool = False,
     ) -> dict:
         """
-        Probeer stap 3 (kies een baan) + stap 4 (bevestigen) uit te voeren.
+        Probeer de volledige reservering uit te voeren.
 
-        Dit is de methode die in de retry-loop wordt aangeroepen.
+        Bij de eerste poging staat de browser al op stap 3 (na voorbereiden).
+        Bij vervolgpogingen wordt de wizard opnieuw doorlopen.
 
         Returns:
             Dict met: success (bool), tijd, baan, foutmelding, en retry (bool).
@@ -915,14 +949,26 @@ class ReserveringBot:
         }
 
         try:
-            # Herlaad de pagina om actuele beschikbaarheid te zien
-            self.page.reload(wait_until="networkidle")
-            self.page.wait_for_timeout(1500)
+            if not is_eerste_poging:
+                # Navigeer opnieuw door de wizard (stap 1 + 2) om op stap 3 te komen
+                logger.info("Herstart wizard voor nieuwe poging...")
+                if not self.navigeer_naar_reservering():
+                    result["foutmelding"] = "Kon niet naar reserveringspagina navigeren"
+                    result["retry"] = True
+                    return result
+
+                if not self.stap1_partners_kiezen(spelers):
+                    result["foutmelding"] = "Kon spelers niet toevoegen bij retry"
+                    result["retry"] = True
+                    return result
+
+                if not self.stap2_kies_dag(target_date, tijden=tijden):
+                    result["foutmelding"] = "Kon dag niet selecteren bij retry"
+                    result["retry"] = True
+                    return result
 
             slot = self.stap3_kies_baan(tijden, baan_voorkeur)
             if not slot:
-                # Geen slot gevonden - kan betekenen dat het nog niet open is
-                # of dat alles bezet is. Retry.
                 result["foutmelding"] = "Geen beschikbaar tijdslot gevonden"
                 result["retry"] = True
                 return result
@@ -935,7 +981,6 @@ class ReserveringBot:
                 if dry_run:
                     result["foutmelding"] = "DRY RUN - niet daadwerkelijk gereserveerd"
             else:
-                # Bevestiging mislukt - mogelijk bezet door iemand anders
                 result["foutmelding"] = "Bevestiging mislukt (mogelijk al bezet)"
                 result["retry"] = True
 
@@ -974,7 +1019,10 @@ class ReserveringBot:
                 result["foutmelding"] = fout
                 return result
 
-            poging = self.probeer_reserveer(tijden, baan_voorkeur, dry_run)
+            poging = self.probeer_reserveer(
+                target_date, tijden, spelers, baan_voorkeur, dry_run,
+                is_eerste_poging=True,
+            )
             result["success"] = poging["success"]
             result["tijd"] = poging["tijd"]
             result["baan"] = poging["baan"]
