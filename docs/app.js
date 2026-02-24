@@ -18,6 +18,7 @@ let state = {
   configSha: null,    // SHA of the config file (needed for updates)
   dirty: false,       // Has the user made changes?
   autoSaveTimer: null, // Debounce timer for auto-save
+  allPlayers: [],     // All club players from players.json [{name, guid}]
 };
 
 // --------------------------------------------------------------------------
@@ -214,6 +215,7 @@ async function loadConfig() {
 
     renderDagen();
     loadWorkflowRuns();
+    loadPlayers();
 
     document.getElementById('section-status').classList.remove('hidden');
     document.getElementById('section-dagen').classList.remove('hidden');
@@ -222,6 +224,26 @@ async function loadConfig() {
     console.error(err);
   } finally {
     loadingEl.classList.add('hidden');
+  }
+}
+
+// --------------------------------------------------------------------------
+// Load players list (from players.json, synced by the bot)
+// --------------------------------------------------------------------------
+
+async function loadPlayers() {
+  try {
+    const res = await ghApi(`/repos/${state.repo}/contents/players.json`);
+    if (!res.ok) return;
+
+    const data = await res.json();
+    const content = atob(data.content);
+    const parsed = JSON.parse(content);
+
+    state.allPlayers = parsed.players || [];
+    console.log(`Spelerslijst geladen: ${state.allPlayers.length} spelers`);
+  } catch (err) {
+    console.warn('players.json niet beschikbaar, gebruik bekende_spelers als fallback');
   }
 }
 
@@ -626,6 +648,9 @@ function handleAddPlayer(dagNr, inputEl) {
 // --------------------------------------------------------------------------
 
 function getBekendSpelers() {
+  if (state.allPlayers.length > 0) {
+    return state.allPlayers.map(p => p.name);
+  }
   return state.config?.medespelers?.bekende_spelers || [];
 }
 

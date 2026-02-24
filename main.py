@@ -6,9 +6,11 @@ Gebruik:
     python main.py --dag 1          # Reserveer voor specifieke dag (0=ma..6=zo)
     python main.py --dry-run        # Simuleer zonder daadwerkelijk te reserveren
     python main.py --no-retry       # Eenmalige poging (geen retry-loop)
+    python main.py --sync-spelers   # Haal spelerslijst op van KNLTB en sla op als players.json
 """
 
 import argparse
+import json
 import logging
 import sys
 import threading
@@ -534,6 +536,41 @@ def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False, ve
     return result
 
 
+def sync_spelers(config: dict):
+    """Haal alle beschikbare spelers op van KNLTB en sla op als players.json."""
+    logger = logging.getLogger(__name__)
+    logger.info("=== Spelerslijst synchroniseren ===")
+
+    players_file = BASE_DIR / "players.json"
+
+    bot = ApiReserveringBot(config)
+    try:
+        bot.start()
+        spelers = bot.haal_alle_spelers()
+    finally:
+        bot.stop()
+
+    if not spelers:
+        logger.error("Geen spelers gevonden op KNLTB - players.json niet bijgewerkt")
+        return
+
+    players_data = {
+        "updated": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "count": len(spelers),
+        "players": [
+            {"name": naam, "guid": guid}
+            for naam, guid in sorted(spelers.items())
+        ],
+    }
+
+    with open(players_file, "w", encoding="utf-8") as f:
+        json.dump(players_data, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"Spelerslijst opgeslagen: {len(spelers)} spelers -> {players_file}")
+    for naam in sorted(spelers.keys()):
+        logger.debug(f"  {naam}")
+
+
 def main():
     """Hoofdfunctie."""
     parser = argparse.ArgumentParser(
@@ -560,6 +597,11 @@ def main():
         action="store_true",
         help="Toon extra debug informatie",
     )
+    parser.add_argument(
+        "--sync-spelers",
+        action="store_true",
+        help="Haal spelerslijst op van KNLTB en sla op als players.json",
+    )
     args = parser.parse_args()
 
     # Setup
@@ -581,6 +623,11 @@ def main():
     except yaml.YAMLError as e:
         logger.error(f"Fout in config.yaml: {e}")
         sys.exit(1)
+
+    # Sync spelers modus
+    if args.sync_spelers:
+        sync_spelers(config)
+        sys.exit(0)
 
     # Bepaal welke dag(en) we moeten reserveren
     if args.dag is not None:

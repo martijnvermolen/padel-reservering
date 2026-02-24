@@ -431,6 +431,19 @@ class ApiReserveringBot:
         return (False, "Geen bevestiging ontvangen - controleer handmatig")
 
     # =========================================================================
+    # SPELER DISCOVERY
+    # =========================================================================
+
+    def haal_alle_spelers(self) -> dict[str, str]:
+        """
+        Haal alle beschikbare clubleden op van de ReservationsPlayers pagina.
+
+        Returns:
+            Dict van {naam: guid} voor alle beschikbare spelers.
+        """
+        return self._ontdek_speler_guids()
+
+    # =========================================================================
     # PUBLIEKE INTERFACE (compatible met main.py)
     # =========================================================================
 

@@ -45,6 +45,20 @@ jobs:
       - name: Installeer Python packages
         run: pip install -r requirements.txt
 
+      - name: Sync spelerslijst
+        env:
+          KNLTB_USERNAME: ${{ secrets.KNLTB_USERNAME }}
+          KNLTB_PASSWORD: ${{ secrets.KNLTB_PASSWORD }}
+        run: python main.py --sync-spelers --verbose
+
+      - name: Commit spelerslijst
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add players.json
+          git diff --cached --quiet || git commit -m "Sync spelerslijst"
+          git push || true
+
       - name: Reserveer padelbaan
         env:
           KNLTB_USERNAME: ${{ secrets.KNLTB_USERNAME }}
