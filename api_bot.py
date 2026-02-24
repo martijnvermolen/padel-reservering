@@ -13,6 +13,7 @@ Flow:
   6. POST /me/ReservationsConfirm        -> Reservering bevestigen
 """
 
+import html as html_mod
 import logging
 import os
 import re
@@ -87,46 +88,80 @@ class ApiReserveringBot:
             raise ReserveringError("CSRF token niet gevonden")
         return match.group(1)
 
+    def _parse_speler_cards(self, html: str) -> dict[str, str]:
+        """
+        Parse HTML met addPlayer cards om naam->GUID mapping te extraheren.
+
+        De cards hebben dit formaat:
+          <div class="card-body addPlayer" ... data-id="GUID">
+              <img ...>
+              Naam
+              <a ...>...</a>
+          </div>
+        """
+        guids = {}
+        for m in re.finditer(
+            r'class="card-body\s+addPlayer"[^>]*data-id="([a-f0-9-]+)"[^>]*>(.*?)</div>',
+            html,
+            re.DOTALL,
+        ):
+            guid = m.group(1)
+            inner = re.sub(r'<[^>]+>', ' ', m.group(2))
+            inner = html_mod.unescape(re.sub(r'\s+', ' ', inner).strip())
+            if inner:
+                guids[inner] = guid
+
+        return guids
+
     def _ontdek_speler_guids(self) -> dict[str, str]:
-        """Parse de ReservationsPlayers pagina om speler GUIDs te vinden."""
+        """Parse de ReservationsPlayers pagina om recente speler GUIDs te vinden."""
         resp = self._session.get(f"{BASE_URL}/me/ReservationsPlayers")
         if resp.status_code != 200:
             raise ReserveringError(f"Kon spelers-pagina niet laden (status {resp.status_code})")
 
-        guids = {}
-        # Zoek patronen: naam gevolgd door of voorafgegaan door een AddPlayer GUID
-        # De pagina toont spelers met hun naam en een knop met het GUID
-        blocks = re.findall(
-            r'AddPlayer[^"]*id=([a-f0-9-]+)[^>]*>.*?</.*?'
-            r'|'
-            r'([A-Z][a-zà-ü]+(?: [a-zà-ü]+)*(?: [A-Z][a-zà-ü]+)+)',
-            resp.text, re.DOTALL
-        )
+        guids = self._parse_speler_cards(resp.text)
 
-        # Alternatief: zoek GUID-naam paren via de pagina-structuur
-        # Elke spelerkaart bevat een GUID in de URL en een naam in de tekst
-        all_guids = re.findall(r'AddPlayer[^"]*id=([a-f0-9-]+)', resp.text)
-        all_names = []
-        for guid in all_guids:
-            idx = resp.text.find(guid)
-            context = resp.text[max(0, idx-500):idx+500]
-            clean = re.sub(r'<[^>]+>', ' ', context)
-            names = re.findall(r'([A-Z][a-zà-ü-]+(?: (?:van |de |den |der )?[A-Za-zà-ü-]+)+)', clean)
-            for name in names:
-                name = name.strip()
-                if len(name) > 4 and name not in guids:
-                    guids[name] = guid
-                    break
-
-        if not guids:
-            # Fallback: alle GUIDs op de pagina extraheren
-            self._log.warning("Kon speler-namen niet koppelen aan GUIDs, gebruik bekende mapping")
-
-        self._log.info(f"Speler GUIDs gevonden: {len(guids)}")
+        self._log.info(f"Recente speler GUIDs gevonden: {len(guids)}")
         for naam, guid in guids.items():
             self._log.debug(f"  {naam} = {guid}")
 
         return guids
+
+    def _zoek_spelers(self, zoekterm: str) -> dict[str, str]:
+        """Zoek spelers via de AJAX search-endpoint met een zoekterm."""
+        resp = self._session.get(
+            f"{BASE_URL}/Ajax/Profile/SearchPlayers",
+            params={"term": zoekterm},
+            headers={"X-Requested-With": "XMLHttpRequest"},
+        )
+        if resp.status_code != 200:
+            self._log.warning(f"Spelers zoeken mislukt (status {resp.status_code})")
+            return {}
+
+        return self._parse_speler_cards(resp.text)
+
+    def _zoek_alle_spelers(self) -> dict[str, str]:
+        """
+        Haal alle clubleden op door per letter a-z te zoeken.
+        De API retourneert max 20 resultaten per zoekterm; door elke letter
+        apart te zoeken bereiken we goede dekking van het ledenbestand.
+        """
+        import string
+
+        alle_spelers: dict[str, str] = {}
+        for letter in string.ascii_lowercase:
+            resultaten = self._zoek_spelers(letter)
+            nieuwe = {k: v for k, v in resultaten.items() if k not in alle_spelers}
+            alle_spelers.update(resultaten)
+
+            if resultaten and nieuwe:
+                self._log.debug(
+                    f"  Zoek '{letter}': {len(resultaten)} gevonden, "
+                    f"{len(nieuwe)} nieuw (totaal: {len(alle_spelers)})"
+                )
+
+        self._log.info(f"Alle spelers via search API: {len(alle_spelers)}")
+        return alle_spelers
 
     def _voeg_spelers_toe(self, spelers: list[str]) -> int:
         """Voeg spelers toe via AJAX en return het aantal succesvol toegevoegde."""
@@ -137,12 +172,22 @@ class ApiReserveringBot:
         for speler in spelers:
             guid = self._speler_guids.get(speler)
             if not guid:
-                # Zoek op achternaam
+                # Zoek op achternaam in bekende GUIDs
                 achternaam = speler.split()[-1].lower()
                 for naam, g in self._speler_guids.items():
                     if achternaam in naam.lower():
                         guid = g
                         break
+
+            if not guid:
+                # Speler niet in recente lijst, zoek via search API
+                self._log.info(f"Speler '{speler}' niet in recente lijst, zoek via API...")
+                zoek_resultaten = self._zoek_spelers(speler)
+                if zoek_resultaten:
+                    guid = next(iter(zoek_resultaten.values()))
+                    naam = next(iter(zoek_resultaten.keys()))
+                    self._speler_guids[naam] = guid
+                    self._log.info(f"Gevonden via search: {naam} ({guid[:8]}...)")
 
             if not guid:
                 self._log.warning(f"Geen GUID gevonden voor '{speler}'")
@@ -436,12 +481,14 @@ class ApiReserveringBot:
 
     def haal_alle_spelers(self) -> dict[str, str]:
         """
-        Haal alle beschikbare clubleden op van de ReservationsPlayers pagina.
+        Haal alle beschikbare clubleden op via de search API.
+        Vereist een actieve sessie (eerst de spelers-pagina bezoeken).
 
         Returns:
             Dict van {naam: guid} voor alle beschikbare spelers.
         """
-        return self._ontdek_speler_guids()
+        self._session.get(f"{BASE_URL}/me/ReservationsPlayers")
+        return self._zoek_alle_spelers()
 
     # =========================================================================
     # PUBLIEKE INTERFACE (compatible met main.py)
