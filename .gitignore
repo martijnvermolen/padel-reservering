@@ -9,6 +9,12 @@ __pycache__/
 .venv/
 venv/
 
+# Discovery/probe bestanden (tijdelijk)
+api_discovery.json
+discovery_*.html
+probe_api*.py
+analyze_*.py
+
 # IDE
 .vscode/
 .idea/
@@ -18,6 +24,3 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
-
-# Windows Task Scheduler (niet nodig voor cloud)
-setup_scheduler.bat

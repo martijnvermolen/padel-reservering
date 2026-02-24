@@ -45,16 +45,6 @@ jobs:
       - name: Installeer Python packages
         run: pip install -r requirements.txt
 
-      - name: Cache Playwright browsers
-        id: playwright-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
-
-      - name: Installeer Playwright browser
-        run: playwright install --with-deps chromium
-
       - name: Reserveer padelbaan
         env:
           KNLTB_USERNAME: ${{ secrets.KNLTB_USERNAME }}
@@ -68,14 +58,6 @@ jobs:
             echo "Geplande trigger - met retry-loop"
             python main.py --verbose
           fi
-
-      - name: Upload screenshots
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: screenshots-${{ github.run_id }}
-          path: screenshots/
-          retention-days: 7
 
       - name: Upload logfile
         uses: actions/upload-artifact@v4

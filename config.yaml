@@ -24,12 +24,14 @@ reservering:
     - 4
     - 2
   duur_minuten: 60
+  parallel_pogingen: 2    # 1 = enkele bot, 2 = twee bots tegelijk (elk een andere baan)
 medespelers:
   bekende_spelers:
     - Ruud van Erp
     - Rick Maat
     - Ron Spaans
     - Eric-jan Verdaasdonk
+    - Pascal Oelp
   standaard_spelers:
     - Ruud van Erp
     - Rick Maat

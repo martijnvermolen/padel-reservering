@@ -3,7 +3,6 @@ main.py - Hoofdscript voor automatische padelbaan reservering bij TPV Heksenwiel
 
 Gebruik:
     python main.py                  # Automatisch: bepaal dag op basis van huidige tijd
-    python main.py --visible        # Met zichtbare browser (voor testen)
     python main.py --dag 1          # Reserveer voor specifieke dag (0=ma..6=zo)
     python main.py --dry-run        # Simuleer zonder daadwerkelijk te reserveren
     python main.py --no-retry       # Eenmalige poging (geen retry-loop)
@@ -20,7 +19,7 @@ from pathlib import Path
 
 import yaml
 
-from browser_bot import ReserveringBot, ReserveringError
+from api_bot import ApiReserveringBot, ReserveringError
 from notifier import EmailNotifier
 
 # Pad naar dit script
@@ -299,10 +298,10 @@ def reserveer_met_retry(
         "foutmelding": None,
     }
 
-    bot = ReserveringBot(config, verbose_screenshots=verbose, label=bot_label)
+    bot = ApiReserveringBot(config, label=bot_label)
     try:
         # --- FASE 1: VOORBEREIDING (voor de 48u-grens) ---
-        logger.info(f"--- FASE 1{label_str}: Voorbereiding (login + stap 1 + stap 2) ---")
+        logger.info(f"--- FASE 1{label_str}: Voorbereiding (login + spelers) ---")
         bot.start()
 
         fout = bot.voorbereiden(target_date, tijden, spelers)
@@ -519,7 +518,7 @@ def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False, ve
     logger.info(f"=== Reservering voor {dagnaam} {target_date.strftime('%d-%m-%Y')} ===")
     logger.info(f"Voorkeurtijden: {tijden} | Medespelers: {spelers}")
 
-    bot = ReserveringBot(config, verbose_screenshots=verbose)
+    bot = ApiReserveringBot(config)
     try:
         bot.start()
         result = bot.reserveer(
@@ -539,11 +538,6 @@ def main():
     """Hoofdfunctie."""
     parser = argparse.ArgumentParser(
         description="Automatische padelbaan reservering - TPV Heksenwiel"
-    )
-    parser.add_argument(
-        "--visible",
-        action="store_true",
-        help="Open de browser zichtbaar (niet headless) voor testen",
     )
     parser.add_argument(
         "--dag",
@@ -587,11 +581,6 @@ def main():
     except yaml.YAMLError as e:
         logger.error(f"Fout in config.yaml: {e}")
         sys.exit(1)
-
-    # Override headless als --visible is meegegeven
-    if args.visible:
-        config.setdefault("browser", {})["headless"] = False
-        config["browser"]["slow_mo"] = max(config["browser"].get("slow_mo", 0), 300)
 
     # Bepaal welke dag(en) we moeten reserveren
     if args.dag is not None:

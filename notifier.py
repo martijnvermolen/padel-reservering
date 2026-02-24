@@ -99,7 +99,33 @@ class EmailNotifier:
         if result.get("success"):
             return f"Padel gereserveerd: {result.get('datum', '?')} om {result.get('tijd', '?')}"
         else:
+            # Voeg korte foutreden toe aan onderwerp
+            fout = result.get("foutmelding", "")
+            korte_reden = self._korte_foutreden(fout)
+            if korte_reden:
+                return f"Padel MISLUKT ({korte_reden}): {result.get('datum', '?')}"
             return f"Padel reservering MISLUKT: {result.get('datum', '?')}"
+
+    def _korte_foutreden(self, foutmelding: str) -> str:
+        """Maak een korte samenvatting van de foutmelding voor het e-mail onderwerp."""
+        if not foutmelding:
+            return ""
+        fout_lower = foutmelding.lower()
+        if "padelbanen zijn bezet" in fout_lower or "alle padelbanen" in fout_lower:
+            return "geen padelbaan vrij"
+        if "heeft al een reservering" in fout_lower:
+            return "speler heeft al reservering"
+        if "maximaal" in fout_lower:
+            return "max reserveringen bereikt"
+        if "niet toegestaan" in fout_lower:
+            return "niet toegestaan"
+        if "login" in fout_lower:
+            return "login mislukt"
+        if "timeout" in fout_lower:
+            return "timeout"
+        if "geen beschikbaar" in fout_lower or "geen padelbaan" in fout_lower:
+            return "geen baan beschikbaar"
+        return ""
 
     def _maak_body_text(self, result: dict) -> str:
         """Maak de platte tekst body van de e-mail."""
@@ -113,22 +139,58 @@ class EmailNotifier:
             lines.append("")
 
         lines.append(f"Datum:    {result.get('datum', 'onbekend')}")
-        lines.append(f"Tijd:     {result.get('tijd', 'onbekend')}")
-        lines.append(f"Baan:     {result.get('baan', 'onbekend')}")
+        lines.append(f"Tijd:     {result.get('tijd') or 'niet gereserveerd'}")
+        lines.append(f"Baan:     {result.get('baan') or 'niet gereserveerd'}")
 
         spelers = result.get("spelers", [])
         if spelers:
             lines.append(f"Spelers:  {', '.join(spelers)}")
 
-        if result.get("foutmelding"):
+        if result.get("foutmelding") and not result.get("success"):
             lines.append("")
-            lines.append(f"Melding:  {result['foutmelding']}")
+            lines.append("REDEN:")
+            lines.append(f"  {result['foutmelding']}")
+
+            # Voeg suggestie toe
+            suggestie = self._maak_suggestie(result["foutmelding"])
+            if suggestie:
+                lines.append("")
+                lines.append("WAT KUN JE DOEN?")
+                lines.append(f"  {suggestie}")
 
         lines.append("")
         lines.append("---")
         lines.append("Automatisch verstuurd door Padel Reservering Bot")
 
         return "\n".join(lines)
+
+    def _maak_suggestie(self, foutmelding: str) -> str:
+        """Geef een suggestie op basis van de foutmelding."""
+        fout_lower = foutmelding.lower()
+
+        if "padelbanen zijn bezet" in fout_lower or "alle padelbanen" in fout_lower:
+            return ("Alle padelbanen waren al gereserveerd op het gewenste tijdstip. "
+                    "Probeer handmatig te reserveren voor een ander tijdstip via "
+                    "https://tpv-heksenwiel.knltb.site/me/ReservationsPlayers")
+
+        if "heeft al een reservering" in fout_lower:
+            return ("Een van de geselecteerde spelers heeft al een reservering binnen "
+                    "2 uur van het gewenste tijdstip. Pas de spelerslijst aan in het "
+                    "dashboard of kies een ander tijdstip.")
+
+        if "maximaal" in fout_lower:
+            return ("Het maximaal aantal reserveringen is bereikt. "
+                    "Annuleer eerst een bestaande reservering als je een nieuwe wilt plaatsen.")
+
+        if "login" in fout_lower:
+            return ("Controleer of de inloggegevens (KNLTB_USERNAME / KNLTB_PASSWORD) "
+                    "nog correct zijn in de GitHub Secrets.")
+
+        if "gewenste tijden" in fout_lower and "wel beschikbaar" in fout_lower:
+            return ("De gewenste tijden waren niet beschikbaar, maar er zijn wel "
+                    "andere tijden vrij. Pas eventueel de tijden aan in het dashboard.")
+
+        return ""
 
     def _maak_body_html(self, result: dict) -> str:
         """Maak de HTML body van de e-mail."""
@@ -140,13 +202,28 @@ class EmailNotifier:
         spelers = result.get("spelers", [])
         spelers_html = ", ".join(spelers) if spelers else "<em>geen</em>"
 
-        foutmelding_html = ""
-        if result.get("foutmelding"):
-            foutmelding_html = f"""
-            <tr>
-                <td style="padding: 8px; font-weight: bold; color: #555;">Melding</td>
-                <td style="padding: 8px; color: #dc3545;">{result['foutmelding']}</td>
-            </tr>"""
+        tijd_html = result.get('tijd') or '<em>niet gereserveerd</em>'
+        baan_html = result.get('baan') or '<em>niet gereserveerd</em>'
+
+        # Foutmelding sectie (alleen bij falen)
+        fout_sectie_html = ""
+        if result.get("foutmelding") and not success:
+            foutmelding = result['foutmelding']
+            suggestie = self._maak_suggestie(foutmelding)
+            suggestie_html = ""
+            if suggestie:
+                suggestie_html = f"""
+                <div style="background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 6px; padding: 12px; margin-top: 12px;">
+                    <strong style="color: #856404;">Wat kun je doen?</strong>
+                    <p style="color: #856404; margin: 6px 0 0 0; font-size: 14px;">{suggestie}</p>
+                </div>"""
+
+            fout_sectie_html = f"""
+                <div style="background-color: #f8d7da; border: 1px solid #f5c6cb; border-radius: 6px; padding: 12px; margin-top: 16px;">
+                    <strong style="color: #721c24;">Reden:</strong>
+                    <p style="color: #721c24; margin: 6px 0 0 0; font-size: 14px;">{foutmelding}</p>
+                </div>
+                {suggestie_html}"""
 
         return f"""
         <html>
@@ -162,18 +239,18 @@ class EmailNotifier:
                     </tr>
                     <tr style="background-color: #f8f9fa;">
                         <td style="padding: 8px; font-weight: bold; color: #555;">Tijd</td>
-                        <td style="padding: 8px;">{result.get('tijd', 'onbekend')}</td>
+                        <td style="padding: 8px;">{tijd_html}</td>
                     </tr>
                     <tr>
                         <td style="padding: 8px; font-weight: bold; color: #555;">Baan</td>
-                        <td style="padding: 8px;">{result.get('baan', 'onbekend')}</td>
+                        <td style="padding: 8px;">{baan_html}</td>
                     </tr>
                     <tr style="background-color: #f8f9fa;">
                         <td style="padding: 8px; font-weight: bold; color: #555;">Spelers</td>
                         <td style="padding: 8px;">{spelers_html}</td>
                     </tr>
-                    {foutmelding_html}
                 </table>
+                {fout_sectie_html}
             </div>
             <p style="color: #999; font-size: 12px; text-align: center; margin-top: 16px;">
                 Automatisch verstuurd door Padel Reservering Bot - TPV Heksenwiel

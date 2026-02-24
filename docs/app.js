@@ -17,6 +17,7 @@ let state = {
   config: null,       // Parsed YAML config
   configSha: null,    // SHA of the config file (needed for updates)
   dirty: false,       // Has the user made changes?
+  autoSaveTimer: null, // Debounce timer for auto-save
 };
 
 // --------------------------------------------------------------------------
@@ -775,6 +776,14 @@ ${yamlStr}`;
 function markDirty() {
   state.dirty = true;
   showSaveBar();
+  scheduleAutoSave();
+}
+
+function scheduleAutoSave() {
+  if (state.autoSaveTimer) clearTimeout(state.autoSaveTimer);
+  state.autoSaveTimer = setTimeout(() => {
+    if (state.dirty) handleSave();
+  }, 2000);
 }
 
 function showSaveBar() {
