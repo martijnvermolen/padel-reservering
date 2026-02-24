@@ -1,6 +1,6 @@
 # =============================================================================
 # Configuratie voor automatische padelbaan reservering - TPV Heksenwiel
-# Bijgewerkt via het dashboard op 24-2-2026, 19:58:39
+# Bijgewerkt via het dashboard op 24-2-2026, 19:58:44
 # =============================================================================
 
 credentials:
@@ -32,6 +32,7 @@ medespelers:
     - Ron Spaans
     - Eric-jan Verdaasdonk
     - Pascal Oelp
+    - Syl
   standaard_spelers:
     - Ruud van Erp
     - Rick Maat
@@ -40,6 +41,7 @@ medespelers:
     "1":
       - Ruud van Erp
       - Rick Maat
+      - Syl
     "6":
       - Ruud van Erp
       - Rick Maat
