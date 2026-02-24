@@ -27,12 +27,16 @@ class ReserveringError(Exception):
 class ReserveringBot:
     """Automatische padelbaan reservering via KNLTB.site."""
 
-    def __init__(self, config: dict, verbose_screenshots: bool = False):
+    def __init__(self, config: dict, verbose_screenshots: bool = False, label: str = ""):
         self.config = config
         self.browser: Browser | None = None
         self.page: Page | None = None
         self.playwright = None
         self.verbose_screenshots = verbose_screenshots
+        self.label = label  # Optioneel label voor logging (bijv. "Bot-A", "Bot-B")
+        self._laatste_fout: str | None = None  # Specifieke foutmelding van laatste actie
+        # Maak een logger met het label zodat alle logregels herkenbaar zijn
+        self._log = logging.getLogger(f"{__name__}.{label}" if label else __name__)
         self._ensure_screenshots_dir()
 
     def _ensure_screenshots_dir(self):
@@ -47,12 +51,13 @@ class ReserveringBot:
             return
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_name = name.replace(":", "-").replace(" ", "_")
-        path = SCREENSHOTS_DIR / f"{timestamp}_{safe_name}.png"
+        label_prefix = f"{self.label}_" if self.label else ""
+        path = SCREENSHOTS_DIR / f"{timestamp}_{label_prefix}{safe_name}.png"
         try:
             self.page.screenshot(path=str(path), full_page=True)
-            logger.debug(f"Screenshot opgeslagen: {path}")
+            self._log.debug(f"Screenshot opgeslagen: {path}")
         except Exception as e:
-            logger.warning(f"Kon screenshot niet maken: {e}")
+            self._log.warning(f"Kon screenshot niet maken: {e}")
 
     def start(self):
         """Start de browser."""
@@ -61,7 +66,7 @@ class ReserveringBot:
         slow_mo = browser_config.get("slow_mo", 0)
         timeout = browser_config.get("timeout", 30000)
 
-        logger.info(f"Browser starten (headless={headless}, slow_mo={slow_mo}ms)")
+        self._log.info(f"Browser starten (headless={headless}, slow_mo={slow_mo}ms)")
 
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
@@ -80,15 +85,24 @@ class ReserveringBot:
         if self.playwright:
             self.playwright.stop()
             self.playwright = None
-        logger.info("Browser gesloten")
+        self._log.info("Browser gesloten")
 
     # =========================================================================
     # LOGIN
     # =========================================================================
 
-    def login(self) -> bool:
+    def login(self, target_url: str = None) -> bool:
         """
         Log in op het KNLTB reserveringssysteem.
+
+        Als target_url is opgegeven, navigeert de browser direct naar die URL.
+        De site redirect automatisch naar het login-formulier als je niet
+        ingelogd bent. Na login ben je dan direct op de gewenste pagina.
+        Dit bespaart een extra navigatie-stap (~2-3s).
+
+        Args:
+            target_url: Optionele URL om direct naartoe te navigeren.
+                        Als None, wordt de login-URL uit de config gebruikt.
 
         Returns:
             True als login succesvol is.
@@ -111,12 +125,19 @@ class ReserveringBot:
                 "Geen wachtwoord geconfigureerd. Stel KNLTB_PASSWORD in of vul config.yaml in."
             )
 
-        logger.info(f"Inloggen met {login_type}: {username}")
+        self._log.info(f"Inloggen met {login_type}: {username}")
+        nav_url = target_url or urls["login"]
+        self._log.info(f"Navigeer naar: {nav_url}")
 
         try:
-            self.page.goto(urls["login"], wait_until="domcontentloaded")
+            self.page.goto(nav_url, wait_until="domcontentloaded")
             self.page.wait_for_load_state("networkidle", timeout=10000)
             self._screenshot("01_login_pagina")
+
+            # Als we al ingelogd zijn (geen login-formulier zichtbaar), klaar
+            if self._is_logged_in():
+                self._log.info("Al ingelogd - geen login nodig")
+                return True
 
             # Selecteer login type als nodig
             if login_type == "clublidnummer":
@@ -132,12 +153,12 @@ class ReserveringBot:
                 "input[name*='bonds'], input[placeholder*='ummer']"
             ).first
             username_field.fill(str(username))
-            logger.debug("Gebruikersnaam ingevuld")
+            self._log.debug("Gebruikersnaam ingevuld")
 
             # Vul wachtwoord in
             password_field = self.page.locator("input[type='password']").first
             password_field.fill(password)
-            logger.debug("Wachtwoord ingevuld")
+            self._log.debug("Wachtwoord ingevuld")
 
             self._screenshot("02_login_ingevuld")
 
@@ -152,19 +173,19 @@ class ReserveringBot:
             self._screenshot("03_na_login")
 
             if self._is_logged_in():
-                logger.info("Login succesvol!")
+                self._log.info("Login succesvol!")
                 return True
             else:
-                logger.error("Login mislukt - nog steeds op login pagina")
+                self._log.error("Login mislukt - nog steeds op login pagina")
                 self._screenshot("03_login_mislukt", force=True)
                 return False
 
         except PlaywrightTimeout as e:
-            logger.error(f"Timeout tijdens inloggen: {e}")
+            self._log.error(f"Timeout tijdens inloggen: {e}")
             self._screenshot("03_login_timeout", force=True)
             return False
         except Exception as e:
-            logger.error(f"Fout tijdens inloggen: {e}")
+            self._log.error(f"Fout tijdens inloggen: {e}")
             self._screenshot("03_login_fout", force=True)
             raise ReserveringError(f"Login mislukt: {e}")
 
@@ -180,7 +201,7 @@ class ReserveringBot:
     def navigeer_naar_reservering(self) -> bool:
         """Navigeer naar de reserveringspagina (baan reserveren wizard)."""
         urls = self.config["urls"]
-        logger.info("Navigeren naar reserveringspagina...")
+        self._log.info("Navigeren naar reserveringspagina...")
 
         try:
             self.page.goto(urls["reservering"], wait_until="domcontentloaded")
@@ -190,7 +211,7 @@ class ReserveringBot:
             # Controleer of we op stap 1 (Partners kiezen) zijn
             stap1 = self.page.locator("text=Partners kiezen")
             if stap1.is_visible():
-                logger.info("Reserveringspagina geladen - Stap 1: Partners kiezen")
+                self._log.info("Reserveringspagina geladen - Stap 1: Partners kiezen")
                 return True
 
             # Probeer op "Baan reserveringen" tab te klikken
@@ -203,11 +224,11 @@ class ReserveringBot:
                 self.page.wait_for_load_state("networkidle", timeout=10000)
                 self._screenshot("04b_baan_tab_geklikt")
 
-            logger.info(f"Huidige URL: {self.page.url}")
+            self._log.info(f"Huidige URL: {self.page.url}")
             return True
 
         except Exception as e:
-            logger.error(f"Fout bij navigatie: {e}")
+            self._log.error(f"Fout bij navigatie: {e}")
             self._screenshot("04_navigatie_fout", force=True)
             return False
 
@@ -229,10 +250,10 @@ class ReserveringBot:
             True als minimaal 1 speler is toegevoegd en we naar stap 2 kunnen.
         """
         if not spelers:
-            logger.warning("Geen medespelers opgegeven")
+            self._log.warning("Geen medespelers opgegeven")
             return False
 
-        logger.info(f"Stap 1: Partners kiezen - {spelers}")
+        self._log.info(f"Stap 1: Partners kiezen - {spelers}")
         spelers_toegevoegd = 0
 
         for speler in spelers:
@@ -240,10 +261,10 @@ class ReserveringBot:
                 spelers_toegevoegd += 1
 
         self._screenshot("05_spelers_toegevoegd")
-        logger.info(f"{spelers_toegevoegd}/{len(spelers)} spelers toegevoegd")
+        self._log.info(f"{spelers_toegevoegd}/{len(spelers)} spelers toegevoegd")
 
         if spelers_toegevoegd == 0:
-            logger.error("Geen enkele speler toegevoegd")
+            self._log.error("Geen enkele speler toegevoegd")
             return False
 
         # Klik op "Volgende >" om naar stap 2 te gaan
@@ -256,7 +277,7 @@ class ReserveringBot:
         Probeert eerst via "Recent mee gespeeld" (klik op "+" naast de naam),
         daarna via het zoekveld.
         """
-        logger.info(f"Speler toevoegen: {speler}")
+        self._log.info(f"Speler toevoegen: {speler}")
 
         # Methode 1: Zoek in "Recent mee gespeeld" lijst
         # Elke speler is een element met de naam en een "+" knop ernaast
@@ -281,14 +302,14 @@ class ReserveringBot:
             if plus_button.count() > 0 and plus_button.first.is_visible():
                 plus_button.first.click()
                 self.page.wait_for_timeout(300)
-                logger.info(f"Speler '{speler}' toegevoegd via Recent mee gespeeld (+)")
+                self._log.info(f"Speler '{speler}' toegevoegd via Recent mee gespeeld (+)")
                 return True
 
             # Probeer het hele parent element te klikken (de kaart zelf)
             try:
                 parent.click()
                 self.page.wait_for_timeout(300)
-                logger.info(f"Speler '{speler}' toegevoegd via klik op kaart")
+                self._log.info(f"Speler '{speler}' toegevoegd via klik op kaart")
                 return True
             except Exception:
                 pass
@@ -301,13 +322,13 @@ class ReserveringBot:
                 try:
                     parent.click()
                     self.page.wait_for_timeout(300)
-                    logger.info(f"Speler '{speler}' toegevoegd via achternaam '{achternaam}'")
+                    self._log.info(f"Speler '{speler}' toegevoegd via achternaam '{achternaam}'")
                     return True
                 except Exception:
                     pass
 
         # Methode 3: Gebruik het zoekveld "Spelers"
-        logger.info(f"Speler '{speler}' niet in Recent - probeer zoekbalk")
+        self._log.info(f"Speler '{speler}' niet in Recent - probeer zoekbalk")
         search_field = self.page.locator(
             "input[placeholder*='peler'], input[placeholder*='oek'], "
             "input[type='search'], input[name*='search']"
@@ -334,10 +355,10 @@ class ReserveringBot:
             if result.is_visible():
                 result.click()
                 self.page.wait_for_timeout(300)
-                logger.info(f"Speler '{speler}' toegevoegd via zoekbalk")
+                self._log.info(f"Speler '{speler}' toegevoegd via zoekbalk")
                 return True
 
-        logger.warning(f"Speler '{speler}' kon niet worden toegevoegd")
+        self._log.warning(f"Speler '{speler}' kon niet worden toegevoegd")
         self._screenshot(f"05_speler_niet_gevonden_{achternaam}", force=True)
         return False
 
@@ -387,7 +408,7 @@ class ReserveringBot:
         Returns:
             True als de datum en dagdeel succesvol geselecteerd zijn.
         """
-        logger.info(f"Stap 2: Kies een dag - {target_date.strftime('%A %d-%m-%Y')}")
+        self._log.info(f"Stap 2: Kies een dag - {target_date.strftime('%A %d-%m-%Y')}")
 
         self.page.wait_for_timeout(300)
         self._screenshot("06_stap2_kies_dag")
@@ -403,14 +424,14 @@ class ReserveringBot:
 
         # Bepaal dagdeel op basis van voorkeurtijden
         dagdeel = self._bepaal_dagdeel(tijden or [])
-        logger.info(f"Zoek naar: '{dag_label}' - dagdeel: '{dagdeel}'")
+        self._log.info(f"Zoek naar: '{dag_label}' - dagdeel: '{dagdeel}'")
 
         try:
             # De pagina toont div.day kolommen met elk een header en dagdelen.
             # Zoek de kolom die de juiste dag bevat en klik op het juiste dagdeel.
             day_columns = self.page.locator(".day")
             column_count = day_columns.count()
-            logger.debug(f"Gevonden dag-kolommen: {column_count}")
+            self._log.debug(f"Gevonden dag-kolommen: {column_count}")
 
             for i in range(column_count):
                 column = day_columns.nth(i)
@@ -418,7 +439,7 @@ class ReserveringBot:
 
                 # Controleer of deze kolom de juiste dag bevat
                 if dag_label in column_text.lower() or f"{dag_afk} {dag_num}" in column_text.lower():
-                    logger.info(f"Dag-kolom gevonden: kolom {i} ('{column_text[:30]}...')")
+                    self._log.info(f"Dag-kolom gevonden: kolom {i} ('{column_text[:30]}...')")
 
                     # Klik op het juiste dagdeel binnen deze kolom
                     dagdeel_element = column.locator(f"text='{dagdeel}'").first
@@ -427,7 +448,7 @@ class ReserveringBot:
                         dagdeel_element.click(force=True)
                         self.page.wait_for_timeout(500)
                         self._screenshot("06b_dagdeel_geselecteerd")
-                        logger.info(f"Dagdeel '{dagdeel}' geselecteerd bij '{dag_label}'")
+                        self._log.info(f"Dagdeel '{dagdeel}' geselecteerd bij '{dag_label}'")
 
                         # Klik Volgende als die er is
                         volgende = self.page.locator(
@@ -437,26 +458,12 @@ class ReserveringBot:
                             return self._klik_volgende("stap2")
                         return True
                     else:
-                        logger.warning(f"Dagdeel '{dagdeel}' niet beschikbaar bij '{dag_label}'")
-                        # Probeer een ander dagdeel
-                        for alt_dagdeel in ["Avond", "Middag", "Ochtend"]:
-                            if alt_dagdeel == dagdeel:
-                                continue
-                            alt_element = column.locator(f"text='{alt_dagdeel}'").first
-                            if alt_element.is_visible():
-                                alt_element.click(force=True)
-                                self.page.wait_for_timeout(500)
-                                self._screenshot(f"06b_{alt_dagdeel}_geselecteerd")
-                                logger.info(f"Alternatief dagdeel '{alt_dagdeel}' geselecteerd")
-                                volgende = self.page.locator(
-                                    "button:has-text('Volgende'), a:has-text('Volgende')"
-                                ).first
-                                if volgende.is_visible():
-                                    return self._klik_volgende("stap2")
-                                return True
+                        self._log.warning(f"Dagdeel '{dagdeel}' niet beschikbaar bij '{dag_label}'")
+                        self._screenshot("06_dagdeel_niet_beschikbaar", force=True)
+                        return False
 
             # Als de dag niet in de huidige week zit, navigeer naar de juiste week
-            logger.info("Dag niet gevonden in huidige week, probeer week-navigatie...")
+            self._log.info("Dag niet gevonden in huidige week, probeer week-navigatie...")
             next_week_btn = self.page.locator(
                 "button:has-text('>'), a:has-text('>')"
             ).last  # De ">" knop naast de weekrange
@@ -467,12 +474,12 @@ class ReserveringBot:
                 # Recursief opnieuw proberen (1 keer)
                 return self._selecteer_dagdeel_in_week(dag_label, dagdeel)
 
-            logger.error(f"Kon dag '{dag_label}' met dagdeel '{dagdeel}' niet vinden")
+            self._log.error(f"Kon dag '{dag_label}' met dagdeel '{dagdeel}' niet vinden")
             self._screenshot("06_dag_niet_gevonden", force=True)
             return False
 
         except Exception as e:
-            logger.error(f"Fout bij dag selectie: {e}")
+            self._log.error(f"Fout bij dag selectie: {e}")
             self._screenshot("06_dag_fout", force=True)
             return False
 
@@ -489,7 +496,7 @@ class ReserveringBot:
                     dagdeel_element.click(force=True)
                     self.page.wait_for_timeout(500)
                     self._screenshot("06d_dagdeel_gevonden")
-                    logger.info(f"Dagdeel '{dagdeel}' gevonden in volgende week")
+                    self._log.info(f"Dagdeel '{dagdeel}' gevonden in volgende week")
                     volgende = self.page.locator(
                         "button:has-text('Volgende'), a:has-text('Volgende')"
                     ).first
@@ -497,7 +504,7 @@ class ReserveringBot:
                         return self._klik_volgende("stap2")
                     return True
 
-        logger.error(f"Dag '{dag_label}' niet gevonden in volgende week")
+        self._log.error(f"Dag '{dag_label}' niet gevonden in volgende week")
         return False
 
     # =========================================================================
@@ -522,7 +529,7 @@ class ReserveringBot:
         Returns:
             Dict met geselecteerde baan en tijd, of None als niets beschikbaar is.
         """
-        logger.info(f"Stap 3: Kies een baan - tijden: {tijden}, voorkeur: {baan_voorkeur}")
+        self._log.info(f"Stap 3: Kies een baan - tijden: {tijden}, voorkeur: {baan_voorkeur}")
 
         self.page.wait_for_timeout(300)
         self._screenshot("07_stap3_kies_baan")
@@ -575,49 +582,37 @@ class ReserveringBot:
                 return results;
             }""")
 
-            logger.info(f"Gevonden tijdslots: {len(slots_info)}")
+            self._log.info(f"Gevonden tijdslots: {len(slots_info)}")
             for slot in slots_info:
-                logger.debug(f"  Slot: {slot['tijd']} op {slot['baan']} (padel={slot['isPadel']})")
+                self._log.debug(f"  Slot: {slot['tijd']} op {slot['baan']} (padel={slot['isPadel']})")
 
             # Filter op padel-banen
             padel_slots = [s for s in slots_info if s["isPadel"]]
-            if not padel_slots and slots_info:
-                # Geen padel-banen herkend - dump pagina-info voor debugging
-                logger.warning("Geen padel-slots gevonden in DOM-analyse")
-                page_debug = self.page.evaluate("""() => {
-                    // Dump alle zichtbare tekst die 'padel' of 'baan' bevat
-                    const info = [];
-                    const allEl = document.querySelectorAll('*');
-                    for (const el of allEl) {
-                        // Alleen directe tekst (niet van kinderen)
-                        const ownText = Array.from(el.childNodes)
-                            .filter(n => n.nodeType === 3)
-                            .map(n => n.textContent.trim())
-                            .filter(t => t.length > 0)
-                            .join(' ');
-                        if (ownText && /padel|baan/i.test(ownText)) {
-                            info.push({
-                                tag: el.tagName,
-                                cls: el.className ? el.className.substring(0, 80) : '',
-                                text: ownText.substring(0, 120)
-                            });
-                        }
-                    }
-                    return info.slice(0, 30);
-                }""")
-                for item in page_debug:
-                    logger.debug(f"  DOM padel/baan: <{item['tag']} class='{item['cls']}'> {item['text']}")
-
-                # Toch alle slots gebruiken als fallback (maar log een duidelijke warning)
-                logger.warning(f"Fallback: gebruik alle {len(slots_info)} slots "
-                               f"(baannamen niet herkend)")
-                padel_slots = slots_info
+            if not padel_slots:
+                # Geen padel-banen beschikbaar - NIET terugvallen op tennisbanen
+                if slots_info:
+                    niet_padel_banen = set(s["baan"] for s in slots_info if s["baan"])
+                    self._laatste_fout = (
+                        f"Alle padelbanen zijn bezet. "
+                        f"Er zijn alleen tennisbanen beschikbaar ({', '.join(niet_padel_banen) or 'onbekend'}). "
+                        f"Gevraagde tijden: {', '.join(tijden)}"
+                    )
+                else:
+                    self._laatste_fout = (
+                        f"Geen enkele baan beschikbaar (ook geen tennis). "
+                        f"Mogelijk zijn alle banen al gereserveerd voor de gevraagde tijden: {', '.join(tijden)}"
+                    )
+                self._log.warning(self._laatste_fout)
+                self._screenshot("07_geen_padel_slots", force=True)
+                return None
 
             # Probeer elke voorkeurstijd, per tijd de banen in voorkeursvolgorde
+            geprobeerde_tijden = []
             for tijd in tijden:
                 matching = [s for s in padel_slots if s["tijd"] == tijd]
                 if not matching:
-                    logger.warning(f"Tijdslot {tijd} niet beschikbaar op padel-banen")
+                    geprobeerde_tijden.append(tijd)
+                    self._log.warning(f"Tijdslot {tijd} niet beschikbaar op padel-banen")
                     continue
 
                 # Sorteer op baanvoorkeur als die is opgegeven
@@ -627,27 +622,27 @@ class ReserveringBot:
                     slot = matching[0]
 
                 if slot:
-                    logger.info(f"Match gevonden: {tijd} op {slot['baan']}")
+                    self._log.info(f"Match gevonden: {tijd} op {slot['baan']}")
+                    self._laatste_fout = None  # Reset fout bij succes
                     self._klik_tijdslot_op_padel(tijd, slot["baan"])
                     return {"tijd": tijd, "baan": slot["baan"]}
 
-            # Fallback: eerste beschikbare padel-slot (op baanvoorkeur)
-            if padel_slots:
-                if baan_voorkeur:
-                    slot = self._kies_baan_op_voorkeur(padel_slots, baan_voorkeur)
-                else:
-                    slot = padel_slots[0]
-                if slot:
-                    logger.info(f"Fallback: {slot['tijd']} op {slot['baan']}")
-                    self._klik_tijdslot_op_padel(slot["tijd"], slot["baan"])
-                    return {"tijd": slot["tijd"], "baan": slot["baan"]}
-
-            logger.error("Geen beschikbaar tijdslot gevonden")
+            # Geen enkel gewenst tijdslot beschikbaar op padelbanen
+            beschikbare_tijden = sorted(set(s["tijd"] for s in padel_slots))
+            beschikbare_banen = sorted(set(s["baan"] for s in padel_slots))
+            self._laatste_fout = (
+                f"Geen padelbaan vrij op de gewenste tijden ({', '.join(tijden)}). "
+                f"Wel beschikbaar: {', '.join(beschikbare_tijden)} op {', '.join(beschikbare_banen)}"
+            ) if beschikbare_tijden else (
+                f"Geen padelbaan beschikbaar op de gewenste tijden ({', '.join(tijden)})"
+            )
+            self._log.error(self._laatste_fout)
             self._screenshot("07_geen_slots", force=True)
             return None
 
         except Exception as e:
-            logger.error(f"Fout bij baan selectie: {e}")
+            self._laatste_fout = f"Technische fout bij baan selectie: {e}"
+            self._log.error(self._laatste_fout)
             self._screenshot("07_baan_fout", force=True)
             return None
 
@@ -683,13 +678,13 @@ class ReserveringBot:
             for slot in slots:
                 baan_nr = self._extract_baan_nummer(slot["baan"])
                 if baan_nr == voorkeur_nr:
-                    logger.info(f"Baan {voorkeur_nr} beschikbaar: {slot['baan']}")
+                    self._log.info(f"Baan {voorkeur_nr} beschikbaar: {slot['baan']}")
                     return slot
                     
-            logger.debug(f"Baan {voorkeur_nr} niet beschikbaar")
+            self._log.debug(f"Baan {voorkeur_nr} niet beschikbaar")
 
         # Geen enkele voorkeursbaan beschikbaar, neem de eerste
-        logger.warning(f"Geen voorkeursbaan ({baan_voorkeur}) beschikbaar, "
+        self._log.warning(f"Geen voorkeursbaan ({baan_voorkeur}) beschikbaar, "
                        f"neem eerste: {slots[0]['baan']}")
         return slots[0] if slots else None
 
@@ -700,7 +695,7 @@ class ReserveringBot:
         Markeert het element via JavaScript met een data-attribuut,
         dan klikt via Playwright's native click (triggert alle event handlers).
         """
-        logger.info(f"Klik op tijdslot {tijd} bij {baan_naam}")
+        self._log.info(f"Klik op tijdslot {tijd} bij {baan_naam}")
 
         # Stap 1: Gebruik JavaScript om het juiste element te markeren
         marked = self.page.evaluate(f"""() => {{
@@ -739,7 +734,7 @@ class ReserveringBot:
         }}""")
 
         if not marked:
-            logger.error(f"Kon tijdslot {tijd} niet vinden op de pagina")
+            self._log.error(f"Kon tijdslot {tijd} niet vinden op de pagina")
             self._screenshot("07_klik_niet_gevonden", force=True)
             return
 
@@ -749,7 +744,7 @@ class ReserveringBot:
             target.click()
             self.page.wait_for_timeout(500)
             self._screenshot(f"07b_{tijd}_geklikt")
-            logger.info(f"Tijdslot {tijd} aangeklikt via Playwright")
+            self._log.info(f"Tijdslot {tijd} aangeklikt via Playwright")
 
             # Klik Volgende als die er is
             volgende = self.page.locator(
@@ -758,14 +753,14 @@ class ReserveringBot:
             if volgende.is_visible():
                 self._klik_volgende("stap3")
         else:
-            logger.error(f"Gemarkeerd element voor {tijd} is niet zichtbaar")
+            self._log.error(f"Gemarkeerd element voor {tijd} is niet zichtbaar")
             self._screenshot("07_target_niet_zichtbaar", force=True)
 
     # =========================================================================
     # STAP 4: BEVESTIGEN
     # =========================================================================
 
-    def stap4_bevestigen(self, dry_run: bool = False) -> bool:
+    def stap4_bevestigen(self, dry_run: bool = False) -> tuple[bool, str]:
         """
         Stap 4 van de wizard: Bevestig de reservering.
 
@@ -773,16 +768,18 @@ class ReserveringBot:
             dry_run: Als True, wordt de reservering niet daadwerkelijk bevestigd.
 
         Returns:
-            True als de reservering succesvol is bevestigd.
+            Tuple van (succes: bool, detail: str).
+            Bij succes is detail een bevestigingsmelding.
+            Bij falen is detail een specifieke foutomschrijving.
         """
-        logger.info(f"Stap 4: Bevestigen (dry_run={dry_run})")
+        self._log.info(f"Stap 4: Bevestigen (dry_run={dry_run})")
 
         self.page.wait_for_timeout(300)
         self._screenshot("08_stap4_bevestigen")
 
         if dry_run:
-            logger.info("DRY RUN - Reservering wordt NIET bevestigd")
-            return True
+            self._log.info("DRY RUN - Reservering wordt NIET bevestigd")
+            return (True, "DRY RUN - niet daadwerkelijk gereserveerd")
 
         try:
             confirm_selectors = [
@@ -799,7 +796,7 @@ class ReserveringBot:
             for selector in confirm_selectors:
                 button = self.page.locator(selector).first
                 if button.is_visible() and button.is_enabled():
-                    logger.info(f"Bevestigingsknop gevonden: {selector}")
+                    self._log.info(f"Bevestigingsknop gevonden: {selector}")
                     pre_url = self.page.url
                     button.click()
                     # Wacht op pagina-update: eerst snel domcontentloaded,
@@ -814,14 +811,14 @@ class ReserveringBot:
                     self._screenshot("08b_na_bevestiging", force=True)
                     return self._check_bevestiging()
 
-            logger.error("Geen bevestigingsknop gevonden")
+            self._log.error("Geen bevestigingsknop gevonden")
             self._screenshot("08_geen_bevestigingsknop", force=True)
-            return False
+            return (False, "Geen bevestigingsknop gevonden op de pagina")
 
         except Exception as e:
-            logger.error(f"Fout bij bevestiging: {e}")
+            self._log.error(f"Fout bij bevestiging: {e}")
             self._screenshot("08_bevestiging_fout", force=True)
-            return False
+            return (False, f"Technische fout bij bevestiging: {e}")
 
     # =========================================================================
     # HULP-FUNCTIES
@@ -829,7 +826,7 @@ class ReserveringBot:
 
     def _klik_volgende(self, stap_naam: str) -> bool:
         """Klik op de 'Volgende >' knop om naar de volgende stap te gaan."""
-        logger.info(f"Klik op 'Volgende' ({stap_naam})")
+        self._log.info(f"Klik op 'Volgende' ({stap_naam})")
         try:
             volgende_btn = self.page.locator(
                 "button:has-text('Volgende'), "
@@ -839,20 +836,26 @@ class ReserveringBot:
             if volgende_btn.is_visible() and volgende_btn.is_enabled():
                 volgende_btn.click()
                 self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-                self.page.wait_for_timeout(500)
                 self._screenshot(f"{stap_naam}_na_volgende")
-                logger.info(f"Doorgegaan naar volgende stap ({stap_naam})")
+                self._log.info(f"Doorgegaan naar volgende stap ({stap_naam})")
                 return True
             else:
-                logger.warning(f"'Volgende' knop niet zichtbaar of niet klikbaar ({stap_naam})")
+                self._log.warning(f"'Volgende' knop niet zichtbaar of niet klikbaar ({stap_naam})")
                 self._screenshot(f"{stap_naam}_volgende_niet_gevonden", force=True)
                 return False
         except Exception as e:
-            logger.error(f"Fout bij klikken op Volgende ({stap_naam}): {e}")
+            self._log.error(f"Fout bij klikken op Volgende ({stap_naam}): {e}")
             return False
 
-    def _check_bevestiging(self) -> bool:
-        """Controleer of de reservering succesvol is bevestigd."""
+    def _check_bevestiging(self) -> tuple[bool, str]:
+        """
+        Controleer of de reservering succesvol is bevestigd.
+
+        Returns:
+            Tuple van (succes: bool, detail: str).
+            Bij succes is detail een bevestigingsmelding.
+            Bij falen is detail een specifieke foutomschrijving.
+        """
         # Gebruik visible text (niet hidden elements / scripts / class names)
         page_text = self.page.evaluate("""() => {
             return document.body.innerText.toLowerCase();
@@ -864,36 +867,153 @@ class ReserveringBot:
             "succesvol gereserveerd", "baan gereserveerd",
             "gelukt", "bevestigd",
         ]
-        error_indicators = [
-            "fout", "mislukt", "niet beschikbaar",
-            "bezet", "al gereserveerd", "niet mogelijk",
-            "maak een keuze", "selecteer een",
-            "heeft al een reservering", "already",
-            "kan niet", "niet toegestaan", "maximaal",
+
+        # Specifieke foutpatronen met duidelijke beschrijvingen
+        # Volgorde is belangrijk: meer specifiek eerst
+        error_patterns = [
+            {
+                "indicators": ["heeft al een reservering", "already has a reservation",
+                               "al een reservering", "already reserved"],
+                "beschrijving": "Speler heeft al een reservering",
+                "detail_fn": self._extract_speler_fout,
+                "retry": False,  # Geen zin om te retrien
+            },
+            {
+                "indicators": ["maximaal", "maximum", "limiet"],
+                "beschrijving": "Maximaal aantal reserveringen bereikt",
+                "detail_fn": None,
+                "retry": False,
+            },
+            {
+                "indicators": ["bezet", "niet beschikbaar", "al gereserveerd",
+                               "occupied", "not available"],
+                "beschrijving": "Baan is bezet of niet meer beschikbaar",
+                "detail_fn": None,
+                "retry": True,
+            },
+            {
+                "indicators": ["maak een keuze", "selecteer een"],
+                "beschrijving": "Geen baan of tijdslot geselecteerd (validatiefout)",
+                "detail_fn": None,
+                "retry": True,
+            },
+            {
+                "indicators": ["niet toegestaan", "kan niet", "niet mogelijk"],
+                "beschrijving": "Reservering niet toegestaan",
+                "detail_fn": None,
+                "retry": False,
+            },
+            {
+                "indicators": ["fout", "error", "mislukt", "failed"],
+                "beschrijving": "Er is een fout opgetreden bij het reserveren",
+                "detail_fn": None,
+                "retry": True,
+            },
         ]
 
+        # Check succes-indicatoren
         for indicator in success_indicators:
             if indicator in page_text:
-                logger.info(f"Bevestiging gevonden: '{indicator}'")
-                return True
+                self._log.info(f"Bevestiging gevonden: '{indicator}'")
+                return (True, f"Reservering bevestigd ({indicator})")
 
-        for indicator in error_indicators:
-            if indicator in page_text:
-                logger.warning(f"Foutmelding gevonden: '{indicator}'")
-                return False
+        # Check fout-indicatoren met specifieke berichten
+        for pattern in error_patterns:
+            for indicator in pattern["indicators"]:
+                if indicator in page_text:
+                    # Probeer specifieke details te extraheren
+                    detail = pattern["beschrijving"]
+                    if pattern["detail_fn"]:
+                        extra = pattern["detail_fn"](page_text)
+                        if extra:
+                            detail = extra
+
+                    # Extraheer relevante tekst rondom de fout
+                    context = self._extract_fout_context(page_text, indicator)
+                    if context and context != detail:
+                        detail = f"{detail}: \"{context}\""
+
+                    self._log.warning(f"Foutmelding: {detail}")
+                    self._laatste_fout = detail
+                    return (False, detail)
+
+        # Check of we op de bevestigingspagina zijn (expliciete succes-URL)
+        if "reservationsconfirm" in current_url:
+            self._log.info(f"Bevestigingspagina bereikt (URL: {current_url}) - reservering gelukt")
+            return (True, "Reservering bevestigd (bevestigingspagina bereikt)")
 
         # Check of de wizard is verlaten (redirect naar hoofdmenu = succes)
-        # De reserveringswizard draait op /me/ReservationsPlayers
-        # Als we daar weg zijn en geen foutmelding zien, is het waarschijnlijk gelukt
         if "reservationsplayers" not in current_url:
-            logger.info(f"Wizard verlaten (URL: {current_url}) - reservering waarschijnlijk gelukt")
-            return True
+            self._log.info(f"Wizard verlaten (URL: {current_url}) - reservering waarschijnlijk gelukt")
+            return (True, "Reservering waarschijnlijk gelukt (wizard verlaten)")
 
         # Nog steeds op de wizard-pagina zonder duidelijke indicator
-        logger.warning("Geen duidelijke bevestiging gevonden - controleer screenshots")
-        logger.debug(f"URL: {current_url}")
-        logger.debug(f"Pagina tekst (eerste 500 tekens): {page_text[:500]}")
-        return False
+        self._log.warning("Geen duidelijke bevestiging gevonden - controleer screenshots")
+        self._log.debug(f"URL: {current_url}")
+        self._log.debug(f"Pagina tekst (eerste 500 tekens): {page_text[:500]}")
+        return (False, "Geen bevestiging ontvangen - controleer handmatig of de reservering is geplaatst")
+
+    def _extract_speler_fout(self, page_text: str) -> str | None:
+        """
+        Probeer de naam van de speler te extraheren die al een reservering heeft.
+
+        Zoekt naar patronen als:
+        - "Ruud van Erp heeft al een reservering"
+        - "Ron Spaans already has a reservation"
+        """
+        import re
+        # Nederlands patroon
+        match = re.search(r'([A-Z][a-zà-ü]+(?: [a-zà-ü]+)*(?: [A-Z][a-zà-ü]+)+)\s+heeft al een reservering',
+                          page_text, re.IGNORECASE)
+        if match:
+            naam = match.group(1).strip()
+            return f"{naam} heeft al een reservering in dit tijdvak (2 uur voor/na)"
+
+        # Engels patroon
+        match = re.search(r'([A-Z][a-zà-ü]+(?: [a-zà-ü]+)*(?: [A-Z][a-zà-ü]+)+)\s+already',
+                          page_text, re.IGNORECASE)
+        if match:
+            naam = match.group(1).strip()
+            return f"{naam} heeft al een reservering in dit tijdvak (2 uur voor/na)"
+
+        return "Een van de spelers heeft al een reservering in dit tijdvak (2 uur voor/na)"
+
+    def _extract_fout_context(self, page_text: str, indicator: str) -> str | None:
+        """
+        Extraheer een kort stuk tekst rondom een gevonden fout-indicator.
+
+        Zoekt de indicator in de tekst en retourneert de zin (of een deel ervan)
+        waar deze in voorkomt.
+        """
+        try:
+            idx = page_text.index(indicator)
+            # Pak 100 tekens voor en na de indicator
+            start = max(0, idx - 80)
+            end = min(len(page_text), idx + len(indicator) + 80)
+            snippet = page_text[start:end].strip()
+
+            # Probeer op zin-grenzen te knippen
+            # Zoek het begin van de zin
+            for sep in ['\n', '. ', '! ']:
+                last_sep = snippet[:idx - start].rfind(sep)
+                if last_sep != -1:
+                    snippet = snippet[last_sep + len(sep):]
+                    break
+
+            # Zoek het einde van de zin
+            for sep in ['\n', '. ', '! ']:
+                next_sep = snippet.find(sep, len(indicator))
+                if next_sep != -1:
+                    snippet = snippet[:next_sep]
+                    break
+
+            snippet = snippet.strip()
+            if len(snippet) > 150:
+                snippet = snippet[:150] + "..."
+
+            return snippet if snippet else None
+        except (ValueError, IndexError):
+            return None
 
     # =========================================================================
     # HOOFD-FLOW (gesplitst in voorbereiden + probeer_reserveer)
@@ -906,10 +1026,11 @@ class ReserveringBot:
         spelers: list[str],
     ) -> str | None:
         """
-        Bereid de reservering voor: login, stap 1 (spelers), stap 2 (dag).
+        Bereid de reservering voor: login + navigatie (gecombineerd), stap 1 (spelers), stap 2 (dag).
 
-        Dit wordt VOOR de 48-uur grens uitgevoerd zodat we klaarstaan
-        op stap 3 wanneer de reservering opengaat.
+        Navigeert direct naar de reserverings-URL. De site redirect naar login
+        als je niet ingelogd bent. Na login ben je direct op de reserveringspagina.
+        Dit bespaart een extra navigatie-stap (~2-3s).
 
         Args:
             target_date: Datum waarvoor gereserveerd moet worden.
@@ -920,11 +1041,30 @@ class ReserveringBot:
             None bij succes, foutmelding-string bij falen.
         """
         try:
-            if not self.login():
+            urls = self.config["urls"]
+            reservering_url = urls["reservering"]
+
+            # Combineer login + navigatie: ga direct naar reserverings-URL
+            if not self.login(target_url=reservering_url):
                 return "Login mislukt"
 
-            if not self.navigeer_naar_reservering():
-                return "Kon niet naar reserveringspagina navigeren"
+            # Controleer of we na login op de reserveringspagina zijn
+            current_url = self.page.url.lower()
+            if "reservationsplayers" in current_url:
+                self._log.info("Direct op reserveringspagina na login")
+                # Check of stap 1 zichtbaar is
+                stap1 = self.page.locator("text=Partners kiezen")
+                if stap1.is_visible():
+                    self._log.info("Stap 1: Partners kiezen is zichtbaar")
+                else:
+                    self._log.info("Pagina geladen, maar stap 1 niet zichtbaar - probeer navigatie")
+                    if not self.navigeer_naar_reservering():
+                        return "Kon niet naar reserveringspagina navigeren"
+            else:
+                # Na login zijn we niet op de reserveringspagina, navigeer er apart naartoe
+                self._log.info("Na login niet op reserveringspagina - navigeer apart")
+                if not self.navigeer_naar_reservering():
+                    return "Kon niet naar reserveringspagina navigeren"
 
             if not self.stap1_partners_kiezen(spelers):
                 return "Kon medespelers niet toevoegen (stap 1)"
@@ -932,7 +1072,7 @@ class ReserveringBot:
             if not self.stap2_kies_dag(target_date, tijden=tijden):
                 return f"Kon datum {target_date.strftime('%d-%m-%Y')} niet selecteren (stap 2)"
 
-            logger.info("Voorbereiding klaar - klaarstaan op stap 3 (kies een baan)")
+            self._log.info("Voorbereiding klaar - klaarstaan op stap 3 (kies een baan)")
             return None
 
         except ReserveringError as e:
@@ -971,7 +1111,7 @@ class ReserveringBot:
         try:
             if not is_eerste_poging:
                 # Navigeer opnieuw door de wizard (stap 1 + 2) om op stap 3 te komen
-                logger.info("Herstart wizard voor nieuwe poging...")
+                self._log.info("Herstart wizard voor nieuwe poging...")
                 if not self.navigeer_naar_reservering():
                     result["foutmelding"] = "Kon niet naar reserveringspagina navigeren"
                     result["retry"] = True
@@ -989,27 +1129,35 @@ class ReserveringBot:
 
             slot = self.stap3_kies_baan(tijden, baan_voorkeur)
             if not slot:
-                result["foutmelding"] = "Geen beschikbaar tijdslot gevonden"
+                result["foutmelding"] = self._laatste_fout or "Geen beschikbaar padel-tijdslot gevonden"
                 result["retry"] = True
                 return result
 
             result["tijd"] = slot["tijd"]
             result["baan"] = slot["baan"]
 
-            if self.stap4_bevestigen(dry_run=dry_run):
+            succes, detail = self.stap4_bevestigen(dry_run=dry_run)
+            if succes:
                 result["success"] = True
                 if dry_run:
-                    result["foutmelding"] = "DRY RUN - niet daadwerkelijk gereserveerd"
+                    result["foutmelding"] = detail
             else:
-                result["foutmelding"] = "Bevestiging mislukt (mogelijk al bezet)"
-                result["retry"] = True
+                result["foutmelding"] = detail
+                # Bepaal of retry zin heeft op basis van het type fout
+                # Bij "speler heeft al een reservering" of "maximaal bereikt" heeft retry geen zin
+                fout_lower = detail.lower() if detail else ""
+                no_retry_indicators = [
+                    "heeft al een reservering",
+                    "maximaal",
+                    "niet toegestaan",
+                ]
+                result["retry"] = not any(ind in fout_lower for ind in no_retry_indicators)
 
         except Exception as e:
             result["foutmelding"] = f"Fout: {e}"
             result["retry"] = True
-            logger.error(f"Fout bij reserveerpoging: {e}")
+            self._log.error(f"Fout bij reserveerpoging: {e}")
 
-        self._screenshot("poging_resultaat", force=True)
         return result
 
     def reserveer(
@@ -1050,7 +1198,7 @@ class ReserveringBot:
 
         except Exception as e:
             result["foutmelding"] = f"Onverwachte fout: {e}"
-            logger.error(f"Onverwachte fout: {e}", exc_info=True)
+            self._log.error(f"Onverwachte fout: {e}", exc_info=True)
         finally:
             self._screenshot("09_eindresultaat", force=True)
 

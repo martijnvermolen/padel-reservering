@@ -3,21 +3,34 @@ name: Padel Reservering
 on:
   schedule:
     # Cron tijden in UTC. Nederland is UTC+1 (winter) / UTC+2 (zomer).
+    # Per reservering TWEE triggers (winter + zomer) zodat de bot altijd
+    # ~20 min voor het 48u-venster start, ongeacht het seizoen.
+    # De verkeerde-seizoen trigger detecteert automatisch dat er niets
+    # te reserveren is en stopt direct. GitHub Actions cron kan 5-30 min
+    # vertraagd zijn, dus 20 min buffer is noodzakelijk.
     #
-    # Dinsdag 20:30 reserveren -> 48u eerder = zondag 20:30
-    #   Start 5 min eerder: zondag 20:25 NL = zondag 19:25 UTC (winter) / 18:25 UTC (zomer)
-    - cron: '25 18 * * 0'    # zondag 18:25 UTC -> reserveer dinsdag 20:30
-
-    # Zondag 19:30 reserveren -> 48u eerder = vrijdag 19:30
-    #   Start 5 min eerder: vrijdag 19:25 NL = vrijdag 18:25 UTC (winter) / 17:25 UTC (zomer)
-    - cron: '25 17 * * 5'    # vrijdag 17:25 UTC -> reserveer zondag 19:30
+    # DINSDAG 20:30 -> 48u eerder = ZONDAG 20:30 NL -> start 20:10 NL
+    - cron: '10 18 * * 0'    # zomer (UTC+2): zo 20:10 CEST
+    - cron: '10 19 * * 0'    # winter (UTC+1): zo 20:10 CET
+    #
+    # DONDERDAG 21:30 -> 48u eerder = DINSDAG 21:30 NL -> start 21:10 NL
+    - cron: '10 19 * * 2'    # zomer (UTC+2): di 21:10 CEST
+    - cron: '10 20 * * 2'    # winter (UTC+1): di 21:10 CET
+    #
+    # ZONDAG 19:30 -> 48u eerder = VRIJDAG 19:30 NL -> start 19:10 NL
+    - cron: '10 17 * * 5'    # zomer (UTC+2): vr 19:10 CEST
+    - cron: '10 18 * * 5'    # winter (UTC+1): vr 19:10 CET
 
   workflow_dispatch:            # Handmatig triggeren mogelijk via GitHub UI
+
+concurrency:
+  group: padel-reservering
+  cancel-in-progress: false
 
 jobs:
   reserveer:
     runs-on: ubuntu-latest
-    timeout-minutes: 15         # Maximale runtime inclusief retry-loop
+    timeout-minutes: 40         # Ruim voor wachttijd + retry-loop (winter kan tot 25 min wachten)
 
     steps:
       - name: Checkout code
@@ -29,10 +42,18 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Installeer dependencies
-        run: |
-          pip install -r requirements.txt
-          playwright install --with-deps chromium
+      - name: Installeer Python packages
+        run: pip install -r requirements.txt
+
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+
+      - name: Installeer Playwright browser
+        run: playwright install --with-deps chromium
 
       - name: Reserveer padelbaan
         env:

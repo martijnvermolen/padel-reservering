@@ -12,7 +12,9 @@ Gebruik:
 import argparse
 import logging
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -149,10 +151,11 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None
     except (ValueError, IndexError):
         target_met_tijd = target.replace(hour=19, minute=0)
 
-    # Ruime controle: tot 1 uur voorbij de 48u-grens accepteren
-    # Dit zorgt dat handmatige triggers ook werken als je net iets
-    # voor of na de exacte 48u-grens zit
-    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=60)
+    # Accepteer targets tot 25 min voorbij de 48u-grens.
+    # Strak genoeg om verkeerde-seizoen cron-triggers te weigeren (die ~80 min
+    # te vroeg starten), maar ruim genoeg voor de correcte trigger (20 min vroeg)
+    # en GHA-vertragingen.
+    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=25)
     if target_met_tijd > max_tijdstip:
         return None
 
@@ -171,6 +174,30 @@ def get_spelers(config: dict, dag: int) -> list[str]:
         if str(dag) in spelers_per_dag:
             return spelers_per_dag[str(dag)]
     return medespelers_config.get("standaard_spelers", [])
+
+
+def splits_baan_voorkeur(baan_voorkeur: list[int], n_bots: int = 2) -> list[list[int]]:
+    """
+    Splits de baanvoorkeurlijst in n_bots delen.
+
+    Verdeelt op even/oneven index zodat elke bot een top-voorkeur krijgt:
+    [1, 3, 4, 2] -> Bot A: [1, 4], Bot B: [3, 2]
+
+    Args:
+        baan_voorkeur: Lijst met baannummers in volgorde van voorkeur.
+        n_bots: Aantal bots (standaard 2).
+
+    Returns:
+        Lijst van lijsten, een per bot.
+    """
+    if not baan_voorkeur or n_bots <= 1:
+        return [baan_voorkeur]
+
+    delen = [[] for _ in range(n_bots)]
+    for i, baan in enumerate(baan_voorkeur):
+        delen[i % n_bots].append(baan)
+
+    return delen
 
 
 def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: int):
@@ -210,7 +237,15 @@ def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: i
         logger.info(f"Reserveringsvenster is al open (sinds {abs(wachttijd):.0f}s geleden)")
 
 
-def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, verbose: bool = False) -> dict:
+def reserveer_met_retry(
+    config: dict,
+    dag_config: dict,
+    dry_run: bool = False,
+    verbose: bool = False,
+    baan_voorkeur_override: list = None,
+    bot_label: str = "",
+    stop_event: threading.Event = None,
+) -> dict:
     """
     Voer een reservering uit met retry-loop.
 
@@ -218,13 +253,24 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, v
     1. Start browser, login, voer stap 1+2 uit (voorbereiding)
     2. Wacht tot vlak voor de 48u-grens
     3. Probeer elke 10 seconden stap 3+4 uit te voeren
-    4. Stop bij: succes, alle banen bezet, of timeout (7 min)
+    4. Stop bij: succes, alle banen bezet, stop_event, of timeout (7 min)
+
+    Args:
+        config: Volledige configuratie.
+        dag_config: Configuratie voor de specifieke dag.
+        dry_run: Simulatiemodus.
+        verbose: Extra debug screenshots.
+        baan_voorkeur_override: Optionele override van de baanvoorkeur
+            (gebruikt bij parallelle pogingen om elke bot andere banen te laten proberen).
+        bot_label: Optioneel label voor logging (bijv. "Bot-A").
+        stop_event: Optioneel threading.Event dat aangeeft dat een andere bot al
+            succesvol heeft gereserveerd. De retry-loop stopt als dit event is gezet.
     """
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger(f"{__name__}.{bot_label}" if bot_label else __name__)
     dag = dag_config["dag"]
     tijden = dag_config.get("tijden", ["19:00"])
     uren_vooruit = config.get("reservering", {}).get("uren_vooruit", 48)
-    baan_voorkeur = config.get("reservering", {}).get("baan_voorkeur", [])
+    baan_voorkeur = baan_voorkeur_override or config.get("reservering", {}).get("baan_voorkeur", [])
 
     target_date = bereken_target_datum(dag_config, uren_vooruit)
     if target_date is None:
@@ -237,10 +283,11 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, v
 
     dagnaam = DAGNAMEN.get(dag, str(dag))
     spelers = get_spelers(config, dag)
+    label_str = f" [{bot_label}]" if bot_label else ""
 
     logger.info("=" * 60)
-    logger.info(f"RESERVERING MET RETRY - {dagnaam} {target_date.strftime('%d-%m-%Y')}")
-    logger.info(f"Tijden: {tijden} | Spelers: {spelers}")
+    logger.info(f"RESERVERING MET RETRY{label_str} - {dagnaam} {target_date.strftime('%d-%m-%Y')}")
+    logger.info(f"Tijden: {tijden} | Spelers: {spelers} | Banen: {baan_voorkeur}")
     logger.info("=" * 60)
 
     result = {
@@ -252,34 +299,40 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, v
         "foutmelding": None,
     }
 
-    bot = ReserveringBot(config, verbose_screenshots=verbose)
+    bot = ReserveringBot(config, verbose_screenshots=verbose, label=bot_label)
     try:
         # --- FASE 1: VOORBEREIDING (voor de 48u-grens) ---
-        logger.info("--- FASE 1: Voorbereiding (login + stap 1 + stap 2) ---")
+        logger.info(f"--- FASE 1{label_str}: Voorbereiding (login + stap 1 + stap 2) ---")
         bot.start()
 
         fout = bot.voorbereiden(target_date, tijden, spelers)
         if fout:
             result["foutmelding"] = fout
-            logger.error(f"Voorbereiding mislukt: {fout}")
+            logger.error(f"Voorbereiding mislukt{label_str}: {fout}")
             return result
 
-        logger.info("Voorbereiding gelukt! Klaar op stap 3.")
+        logger.info(f"Voorbereiding gelukt{label_str}! Klaar op stap 3.")
 
         # --- FASE 2: WACHT OP 48U-GRENS ---
-        logger.info("--- FASE 2: Wachten op reserveringsvenster ---")
+        logger.info(f"--- FASE 2{label_str}: Wachten op reserveringsvenster ---")
         eerste_tijd = tijden[0]
         wacht_tot_48u_grens(target_date, eerste_tijd, uren_vooruit)
 
         # --- FASE 3: RETRY-LOOP ---
-        logger.info("--- FASE 3: Retry-loop gestart ---")
+        logger.info(f"--- FASE 3{label_str}: Retry-loop gestart ---")
         start_retry = datetime.now()
         timeout = timedelta(minutes=RETRY_TIMEOUT_MIN)
         poging_nr = 0
 
         while datetime.now() - start_retry < timeout:
+            # Check of een andere bot al succesvol was
+            if stop_event and stop_event.is_set():
+                logger.info(f"Stop-signaal ontvangen{label_str} - andere bot was succesvol")
+                result["foutmelding"] = "Gestopt: andere bot heeft al gereserveerd"
+                return result
+
             poging_nr += 1
-            logger.info(f"--- Poging {poging_nr} ({datetime.now().strftime('%H:%M:%S')}) ---")
+            logger.info(f"--- Poging {poging_nr}{label_str} ({datetime.now().strftime('%H:%M:%S')}) ---")
 
             poging = bot.probeer_reserveer(
                 target_date, tijden, spelers, baan_voorkeur, dry_run,
@@ -291,35 +344,155 @@ def reserveer_met_retry(config: dict, dag_config: dict, dry_run: bool = False, v
                 result["tijd"] = poging["tijd"]
                 result["baan"] = poging["baan"]
                 result["foutmelding"] = poging.get("foutmelding")
-                logger.info(f"SUCCES na {poging_nr} poging(en): "
+                logger.info(f"SUCCES{label_str} na {poging_nr} poging(en): "
                             f"{poging['tijd']} op {poging['baan']}")
+                # Signaleer andere bots om te stoppen
+                if stop_event:
+                    stop_event.set()
                 return result
 
             if not poging["retry"]:
                 # Definitief mislukt (bijv. baan al bezet, geen retry mogelijk)
                 result["foutmelding"] = poging["foutmelding"]
-                logger.warning(f"Definitief mislukt na {poging_nr} pogingen: "
+                logger.warning(f"Definitief mislukt{label_str} na {poging_nr} pogingen: "
                                f"{poging['foutmelding']}")
                 return result
 
             # Retry - wacht even en probeer opnieuw
-            logger.info(f"Nog niet gelukt ({poging['foutmelding']}), "
+            logger.info(f"Nog niet gelukt{label_str} ({poging['foutmelding']}), "
                         f"volgende poging over {RETRY_INTERVAL_SEC}s...")
             time.sleep(RETRY_INTERVAL_SEC)
 
         # Timeout bereikt
         result["foutmelding"] = (
-            f"Timeout na {RETRY_TIMEOUT_MIN} minuten en {poging_nr} pogingen"
+            f"Timeout{label_str} na {RETRY_TIMEOUT_MIN} minuten en {poging_nr} pogingen"
         )
         logger.error(result["foutmelding"])
 
     except Exception as e:
-        result["foutmelding"] = f"Onverwachte fout: {e}"
-        logger.error(f"Onverwachte fout: {e}", exc_info=True)
+        result["foutmelding"] = f"Onverwachte fout{label_str}: {e}"
+        logger.error(f"Onverwachte fout{label_str}: {e}", exc_info=True)
     finally:
         bot.stop()
 
     return result
+
+
+def reserveer_parallel(config: dict, dag_config: dict, dry_run: bool = False, verbose: bool = False) -> dict:
+    """
+    Voer een reservering uit met twee parallelle bots, elk gericht op andere banen.
+
+    Strategie:
+    - Splits de baanvoorkeur in twee delen (bijv. [1,4] en [3,2])
+    - Start twee onafhankelijke browser-sessies die tegelijkertijd de wizard doorlopen
+    - De eerste bot die succesvol reserveert signaleert de andere om te stoppen
+    - Als beide falen, worden de foutmeldingen gecombineerd
+
+    Dit verhoogt de succeskans doordat twee banen tegelijk worden geprobeerd.
+    De KNLTB-site blokkeert zelf dubbele boekingen, dus dit is veilig.
+    """
+    logger = logging.getLogger(__name__)
+    dag = dag_config["dag"]
+    baan_voorkeur = config.get("reservering", {}).get("baan_voorkeur", [])
+    n_bots = config.get("reservering", {}).get("parallel_pogingen", 1)
+
+    if n_bots <= 1 or len(baan_voorkeur) < 2:
+        # Niet genoeg banen om te splitsen, gebruik standaard modus
+        logger.info("Parallelle modus niet mogelijk (te weinig banen), gebruik standaard")
+        return reserveer_met_retry(config, dag_config, dry_run=dry_run, verbose=verbose)
+
+    # Splits baanvoorkeur over de bots
+    voorkeur_delen = splits_baan_voorkeur(baan_voorkeur, n_bots)
+    bot_labels = [f"Bot-{chr(65 + i)}" for i in range(n_bots)]  # Bot-A, Bot-B, ...
+
+    logger.info("=" * 60)
+    logger.info(f"PARALLELLE RESERVERING - {n_bots} bots tegelijk")
+    for label, deel in zip(bot_labels, voorkeur_delen):
+        logger.info(f"  {label}: banen {deel}")
+    logger.info("=" * 60)
+
+    # Gedeeld stop-event: zodra een bot slaagt, stoppen de anderen
+    stop_event = threading.Event()
+
+    def _run_bot(label: str, baan_deel: list) -> dict:
+        """Wrapper voor een enkele bot in een thread."""
+        try:
+            return reserveer_met_retry(
+                config=config,
+                dag_config=dag_config,
+                dry_run=dry_run,
+                verbose=verbose,
+                baan_voorkeur_override=baan_deel,
+                bot_label=label,
+                stop_event=stop_event,
+            )
+        except Exception as e:
+            logger.error(f"Onverwachte fout in {label}: {e}", exc_info=True)
+            return {
+                "success": False,
+                "datum": "n.v.t.",
+                "tijd": None,
+                "baan": None,
+                "spelers": [],
+                "foutmelding": f"Onverwachte fout in {label}: {e}",
+            }
+
+    # Start alle bots parallel
+    resultaten = []
+    with ThreadPoolExecutor(max_workers=n_bots) as executor:
+        futures = {
+            executor.submit(_run_bot, label, deel): label
+            for label, deel in zip(bot_labels, voorkeur_delen)
+        }
+
+        for future in as_completed(futures):
+            label = futures[future]
+            try:
+                result = future.result()
+                resultaten.append((label, result))
+                if result["success"]:
+                    logger.info(f"{label} SUCCES: {result['tijd']} op {result['baan']}")
+                else:
+                    logger.info(f"{label} mislukt: {result.get('foutmelding', '?')}")
+            except Exception as e:
+                logger.error(f"{label} crashte: {e}")
+                resultaten.append((label, {
+                    "success": False, "datum": "n.v.t.", "tijd": None,
+                    "baan": None, "spelers": [], "foutmelding": f"{label} crashte: {e}",
+                }))
+
+    # Bepaal het eindresultaat
+    # Prioriteit: eerste succes; anders combineer foutmeldingen
+    succes_resultaten = [(l, r) for l, r in resultaten if r["success"]]
+    if succes_resultaten:
+        winner_label, winner_result = succes_resultaten[0]
+        logger.info(f"Parallelle reservering gelukt via {winner_label}: "
+                     f"{winner_result['tijd']} op {winner_result['baan']}")
+        return winner_result
+
+    # Geen enkele bot slaagde - combineer foutmeldingen
+    foutmeldingen = []
+    spelers = []
+    datum = "n.v.t."
+    for label, result in resultaten:
+        if result.get("foutmelding"):
+            foutmeldingen.append(f"{label}: {result['foutmelding']}")
+        if result.get("spelers"):
+            spelers = result["spelers"]
+        if result.get("datum") and result["datum"] != "n.v.t.":
+            datum = result["datum"]
+
+    gecombineerde_fout = " | ".join(foutmeldingen) if foutmeldingen else "Onbekende fout"
+    logger.warning(f"Alle {n_bots} bots mislukt: {gecombineerde_fout}")
+
+    return {
+        "success": False,
+        "datum": datum,
+        "tijd": None,
+        "baan": None,
+        "spelers": spelers,
+        "foutmelding": gecombineerde_fout,
+    }
 
 
 def reserveer_voor_dag(config: dict, dag_config: dict, dry_run: bool = False, verbose: bool = False) -> dict:
@@ -441,6 +614,11 @@ def main():
     email_config = config.get("email", {})
     notifier = EmailNotifier(email_config)
 
+    # Bepaal of we parallelle modus gebruiken
+    parallel_pogingen = config.get("reservering", {}).get("parallel_pogingen", 1)
+    if parallel_pogingen > 1:
+        logger.info(f"Parallelle modus: {parallel_pogingen} bots tegelijk")
+
     # Voer reserveringen uit voor alle gevonden dagen
     resultaten = []
     for dag_config in te_reserveren:
@@ -449,6 +627,8 @@ def main():
 
         if args.no_retry:
             result = reserveer_voor_dag(config, dag_config, dry_run=args.dry_run, verbose=args.verbose)
+        elif parallel_pogingen > 1:
+            result = reserveer_parallel(config, dag_config, dry_run=args.dry_run, verbose=args.verbose)
         else:
             result = reserveer_met_retry(config, dag_config, dry_run=args.dry_run, verbose=args.verbose)
 
