@@ -18,6 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import yaml
 
@@ -26,6 +27,9 @@ from notifier import EmailNotifier
 
 # Pad naar dit script
 BASE_DIR = Path(__file__).parent
+
+# Tijdzone: config-tijden zijn Nederlandse lokale tijd
+NL_TZ = ZoneInfo("Europe/Amsterdam")
 
 # Logging configuratie
 LOG_FILE = BASE_DIR / "reservering.log"
@@ -96,12 +100,12 @@ def vind_reserveerbare_dagen(config: dict) -> list[dict]:
         Lijst van dag_config dicts die nu reserveerbaar zijn (kan leeg zijn).
     """
     logger = logging.getLogger(__name__)
-    nu = datetime.now()
+    nu = datetime.now(NL_TZ)
     uren_vooruit = config.get("reservering", {}).get("uren_vooruit", 48)
     dagen_config = config.get("reservering", {}).get("dagen", [])
     reserveerbaar = []
 
-    logger.info(f"Zoek reserveerbare dagen - huidig tijdstip: {nu.strftime('%A %d-%m-%Y %H:%M')}")
+    logger.info(f"Zoek reserveerbare dagen - huidig tijdstip: {nu.strftime('%A %d-%m-%Y %H:%M %Z')}")
 
     for dag_config in dagen_config:
         dag = dag_config["dag"]
@@ -126,7 +130,7 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None
     Returns:
         De target datum, of None als buiten de reserveringsperiode.
     """
-    nu = datetime.now()
+    nu = datetime.now(NL_TZ)
     vandaag = nu.replace(hour=0, minute=0, second=0, microsecond=0)
     gewenste_dag = dag_config["dag"]
     huidige_dag = vandaag.weekday()
@@ -217,20 +221,21 @@ def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: i
 
     # Het moment waarop het reserveringsvenster opengaat
     reservering_dt = target_date.replace(hour=uur, minute=minuut, second=0, microsecond=0)
+    if reservering_dt.tzinfo is None:
+        reservering_dt = reservering_dt.replace(tzinfo=NL_TZ)
     venster_open = reservering_dt - timedelta(hours=uren_vooruit)
 
-    nu = datetime.now()
+    nu = datetime.now(NL_TZ)
     wachttijd = (venster_open - nu).total_seconds()
 
     if wachttijd > 0:
-        logger.info(f"Reserveringsvenster opent om: {venster_open.strftime('%H:%M:%S')}")
+        logger.info(f"Reserveringsvenster opent om: {venster_open.strftime('%H:%M:%S %Z')}")
         logger.info(f"Nog {wachttijd:.0f} seconden wachten ({wachttijd/60:.1f} minuten)...")
 
-        # Wacht in stappen van 10 seconden zodat we logs zien
         while wachttijd > 0:
             slaap = min(wachttijd, 10)
             time.sleep(slaap)
-            nu = datetime.now()
+            nu = datetime.now(NL_TZ)
             wachttijd = (venster_open - nu).total_seconds()
             if wachttijd > 0 and int(wachttijd) % 60 < 11:
                 logger.info(f"Nog {wachttijd:.0f}s tot venster opent...")
@@ -321,11 +326,11 @@ def reserveer_met_retry(
 
         # --- FASE 3: RETRY-LOOP ---
         logger.info(f"--- FASE 3{label_str}: Retry-loop gestart ---")
-        start_retry = datetime.now()
+        start_retry = datetime.now(NL_TZ)
         timeout = timedelta(minutes=RETRY_TIMEOUT_MIN)
         poging_nr = 0
 
-        while datetime.now() - start_retry < timeout:
+        while datetime.now(NL_TZ) - start_retry < timeout:
             # Check of een andere bot al succesvol was
             if stop_event and stop_event.is_set():
                 logger.info(f"Stop-signaal ontvangen{label_str} - andere bot was succesvol")
@@ -333,7 +338,7 @@ def reserveer_met_retry(
                 return result
 
             poging_nr += 1
-            logger.info(f"--- Poging {poging_nr}{label_str} ({datetime.now().strftime('%H:%M:%S')}) ---")
+            logger.info(f"--- Poging {poging_nr}{label_str} ({datetime.now(NL_TZ).strftime('%H:%M:%S')}) ---")
 
             poging = bot.probeer_reserveer(
                 target_date, tijden, spelers, baan_voorkeur, dry_run,
@@ -555,7 +560,7 @@ def sync_spelers(config: dict):
         return
 
     players_data = {
-        "updated": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+        "updated": datetime.now(NL_TZ).strftime("%Y-%m-%dT%H:%M:%S"),
         "count": len(spelers),
         "players": [
             {"name": naam, "guid": guid}
@@ -609,7 +614,7 @@ def main():
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
     logger.info("Padel Reservering Bot - TPV Heksenwiel")
-    logger.info(f"Gestart op: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"Gestart op: {datetime.now(NL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"Modus: {'dry-run' if args.dry_run else 'live'} | "
                 f"Retry: {'nee' if args.no_retry else 'ja'}")
     logger.info("=" * 60)
