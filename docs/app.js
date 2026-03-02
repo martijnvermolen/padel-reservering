@@ -808,7 +808,7 @@ function scheduleAutoSave() {
   if (state.autoSaveTimer) clearTimeout(state.autoSaveTimer);
   state.autoSaveTimer = setTimeout(() => {
     if (state.dirty) handleSave();
-  }, 2000);
+  }, 5000);
 }
 
 function showSaveBar() {
