@@ -1,5 +1,5 @@
 """
-main.py - Hoofdscript voor automatische padelbaan reservering bij TPV Heksenwiel.
+main.py - Hoofdscript voor automatische padelbaan reservering.
 
 Gebruik:
     python main.py                  # Automatisch: bepaal dag op basis van huidige tijd
@@ -44,10 +44,10 @@ DAGNAMEN = {
     6: "zondag",
 }
 
-# Retry configuratie
+# Timing configuratie
 RETRY_INTERVAL_SEC = 10     # Seconden tussen pogingen
-RETRY_TIMEOUT_MIN = 7       # Maximaal aantal minuten retrying (5 min voor + 2 min na)
-VOORBEREIDING_MIN = 5       # Minuten voor de 48u-grens dat we starten met voorbereiden
+VOORBEREIDING_MIN = 3       # Minuten voor de 48u-grens dat we inloggen en spelers selecteren
+NA_VENSTER_MAX_MIN = 3      # Minuten na het 48u-venster dat we blijven proberen
 
 
 def setup_logging(verbose: bool = False):
@@ -205,42 +205,56 @@ def splits_baan_voorkeur(baan_voorkeur: list[int], n_bots: int = 2) -> list[list
     return delen
 
 
-def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: int):
+def bereken_venster_open(target_date: datetime, eerste_tijd: str, uren_vooruit: int) -> datetime:
     """
-    Wacht tot het 48u-reserveringsvenster bijna open is.
+    Bereken het exacte moment waarop het reserveringsvenster opengaat.
 
-    Het script is al gestart en voorbereid (login + stap 1+2 klaar).
-    Nu wachten we tot kort voor de 48u-grens zodat we meteen kunnen proberen.
+    Returns:
+        Timezone-aware datetime van het moment waarop het venster opent.
     """
-    logger = logging.getLogger(__name__)
-
     try:
         uur, minuut = map(int, eerste_tijd.split(":"))
     except ValueError:
         uur, minuut = 19, 0
 
-    # Het moment waarop het reserveringsvenster opengaat
     reservering_dt = target_date.replace(hour=uur, minute=minuut, second=0, microsecond=0)
     if reservering_dt.tzinfo is None:
         reservering_dt = reservering_dt.replace(tzinfo=NL_TZ)
-    venster_open = reservering_dt - timedelta(hours=uren_vooruit)
+    return reservering_dt - timedelta(hours=uren_vooruit)
 
+
+def _wacht_tot(doel: datetime, label: str):
+    """Wacht in een sleep-loop tot het doel-tijdstip is bereikt."""
+    logger = logging.getLogger(__name__)
     nu = datetime.now(NL_TZ)
-    wachttijd = (venster_open - nu).total_seconds()
+    wachttijd = (doel - nu).total_seconds()
 
     if wachttijd > 0:
-        logger.info(f"Reserveringsvenster opent om: {venster_open.strftime('%H:%M:%S %Z')}")
+        logger.info(f"{label} om: {doel.strftime('%H:%M:%S %Z')}")
         logger.info(f"Nog {wachttijd:.0f} seconden wachten ({wachttijd/60:.1f} minuten)...")
 
         while wachttijd > 0:
             slaap = min(wachttijd, 10)
             time.sleep(slaap)
             nu = datetime.now(NL_TZ)
-            wachttijd = (venster_open - nu).total_seconds()
+            wachttijd = (doel - nu).total_seconds()
             if wachttijd > 0 and int(wachttijd) % 60 < 11:
-                logger.info(f"Nog {wachttijd:.0f}s tot venster opent...")
+                logger.info(f"Nog {wachttijd:.0f}s tot {label}...")
     else:
-        logger.info(f"Reserveringsvenster is al open (sinds {abs(wachttijd):.0f}s geleden)")
+        logger.info(f"{label} al bereikt (sinds {abs(wachttijd):.0f}s geleden)")
+
+
+def wacht_tot_voorbereiding(target_date: datetime, eerste_tijd: str, uren_vooruit: int):
+    """Wacht tot VOORBEREIDING_MIN minuten voor het 48u-venster voor login + spelers."""
+    venster_open = bereken_venster_open(target_date, eerste_tijd, uren_vooruit)
+    start_voorbereiding = venster_open - timedelta(minutes=VOORBEREIDING_MIN)
+    _wacht_tot(start_voorbereiding, "start voorbereiding")
+
+
+def wacht_tot_48u_grens(target_date: datetime, eerste_tijd: str, uren_vooruit: int):
+    """Wacht tot het 48u-reserveringsvenster open is."""
+    venster_open = bereken_venster_open(target_date, eerste_tijd, uren_vooruit)
+    _wacht_tot(venster_open, "reserveringsvenster")
 
 
 def reserveer_met_retry(
@@ -255,17 +269,18 @@ def reserveer_met_retry(
     """
     Voer een reservering uit met retry-loop.
 
-    Strategie:
-    1. Start browser, login, voer stap 1+2 uit (voorbereiding)
-    2. Wacht tot vlak voor de 48u-grens
-    3. Probeer elke 10 seconden stap 3+4 uit te voeren
-    4. Stop bij: succes, alle banen bezet, stop_event, of timeout (7 min)
+    Timing:
+    1. Wacht tot T-3min (VOORBEREIDING_MIN voor het 48u-venster)
+    2. Login + spelers selecteren
+    3. Wacht tot T (48u-venster opent)
+    4. Retry-loop tot T+3min (NA_VENSTER_MAX_MIN na het venster)
+    5. Stop bij: succes, definitieve fout, stop_event, of deadline
 
     Args:
         config: Volledige configuratie.
         dag_config: Configuratie voor de specifieke dag.
         dry_run: Simulatiemodus.
-        verbose: Extra debug screenshots.
+        verbose: Extra debug output.
         baan_voorkeur_override: Optionele override van de baanvoorkeur
             (gebruikt bij parallelle pogingen om elke bot andere banen te laten proberen).
         bot_label: Optioneel label voor logging (bijv. "Bot-A").
@@ -290,10 +305,17 @@ def reserveer_met_retry(
     dagnaam = DAGNAMEN.get(dag, str(dag))
     spelers = get_spelers(config, dag)
     label_str = f" [{bot_label}]" if bot_label else ""
+    eerste_tijd = tijden[0]
+
+    # Bereken absolute tijdstippen
+    venster_open = bereken_venster_open(target_date, eerste_tijd, uren_vooruit)
+    deadline = venster_open + timedelta(minutes=NA_VENSTER_MAX_MIN)
 
     logger.info("=" * 60)
     logger.info(f"RESERVERING MET RETRY{label_str} - {dagnaam} {target_date.strftime('%d-%m-%Y')}")
     logger.info(f"Tijden: {tijden} | Spelers: {spelers} | Banen: {baan_voorkeur}")
+    logger.info(f"Venster opent: {venster_open.strftime('%H:%M:%S %Z')} | "
+                f"Deadline: {deadline.strftime('%H:%M:%S %Z')}")
     logger.info("=" * 60)
 
     result = {
@@ -307,8 +329,12 @@ def reserveer_met_retry(
 
     bot = ApiReserveringBot(config, label=bot_label)
     try:
-        # --- FASE 1: VOORBEREIDING (voor de 48u-grens) ---
-        logger.info(f"--- FASE 1{label_str}: Voorbereiding (login + spelers) ---")
+        # --- FASE 1: WACHT TOT T-3min ---
+        logger.info(f"--- FASE 1{label_str}: Wachten tot voorbereiding ({VOORBEREIDING_MIN} min voor venster) ---")
+        wacht_tot_voorbereiding(target_date, eerste_tijd, uren_vooruit)
+
+        # --- FASE 2: LOGIN + SPELERS (3 min buffer voor venster) ---
+        logger.info(f"--- FASE 2{label_str}: Voorbereiding (login + spelers) ---")
         bot.start()
 
         fout = bot.voorbereiden(target_date, tijden, spelers)
@@ -317,21 +343,17 @@ def reserveer_met_retry(
             logger.error(f"Voorbereiding mislukt{label_str}: {fout}")
             return result
 
-        logger.info(f"Voorbereiding gelukt{label_str}! Klaar op stap 3.")
+        logger.info(f"Voorbereiding gelukt{label_str}! Klaar voor reservering.")
 
-        # --- FASE 2: WACHT OP 48U-GRENS ---
-        logger.info(f"--- FASE 2{label_str}: Wachten op reserveringsvenster ---")
-        eerste_tijd = tijden[0]
+        # --- FASE 3: WACHT OP 48U-GRENS ---
+        logger.info(f"--- FASE 3{label_str}: Wachten op reserveringsvenster ---")
         wacht_tot_48u_grens(target_date, eerste_tijd, uren_vooruit)
 
-        # --- FASE 3: RETRY-LOOP ---
-        logger.info(f"--- FASE 3{label_str}: Retry-loop gestart ---")
-        start_retry = datetime.now(NL_TZ)
-        timeout = timedelta(minutes=RETRY_TIMEOUT_MIN)
+        # --- FASE 4: RETRY-LOOP (tot absolute deadline T+3min) ---
+        logger.info(f"--- FASE 4{label_str}: Retry-loop tot {deadline.strftime('%H:%M:%S')} ---")
         poging_nr = 0
 
-        while datetime.now(NL_TZ) - start_retry < timeout:
-            # Check of een andere bot al succesvol was
+        while datetime.now(NL_TZ) < deadline:
             if stop_event and stop_event.is_set():
                 logger.info(f"Stop-signaal ontvangen{label_str} - andere bot was succesvol")
                 result["foutmelding"] = "Gestopt: andere bot heeft al gereserveerd"
@@ -352,26 +374,28 @@ def reserveer_met_retry(
                 result["foutmelding"] = poging.get("foutmelding")
                 logger.info(f"SUCCES{label_str} na {poging_nr} poging(en): "
                             f"{poging['tijd']} op {poging['baan']}")
-                # Signaleer andere bots om te stoppen
                 if stop_event:
                     stop_event.set()
                 return result
 
             if not poging["retry"]:
-                # Definitief mislukt (bijv. baan al bezet, geen retry mogelijk)
                 result["foutmelding"] = poging["foutmelding"]
                 logger.warning(f"Definitief mislukt{label_str} na {poging_nr} pogingen: "
                                f"{poging['foutmelding']}")
                 return result
 
-            # Retry - wacht even en probeer opnieuw
+            # Check of we nog tijd hebben voor een volgende poging
+            if datetime.now(NL_TZ) >= deadline:
+                break
+
             logger.info(f"Nog niet gelukt{label_str} ({poging['foutmelding']}), "
                         f"volgende poging over {RETRY_INTERVAL_SEC}s...")
             time.sleep(RETRY_INTERVAL_SEC)
 
-        # Timeout bereikt
+        # Deadline bereikt
         result["foutmelding"] = (
-            f"Timeout{label_str} na {RETRY_TIMEOUT_MIN} minuten en {poging_nr} pogingen"
+            f"Deadline bereikt{label_str} ({deadline.strftime('%H:%M:%S')}) "
+            f"na {poging_nr} pogingen"
         )
         logger.error(result["foutmelding"])
 
@@ -579,7 +603,7 @@ def sync_spelers(config: dict):
 def main():
     """Hoofdfunctie."""
     parser = argparse.ArgumentParser(
-        description="Automatische padelbaan reservering - TPV Heksenwiel"
+        description="Automatische padelbaan reservering"
     )
     parser.add_argument(
         "--dag",
@@ -613,7 +637,7 @@ def main():
     setup_logging(verbose=args.verbose)
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
-    logger.info("Padel Reservering Bot - TPV Heksenwiel")
+    logger.info("Padel Reservering Bot")
     logger.info(f"Gestart op: {datetime.now(NL_TZ).strftime('%Y-%m-%d %H:%M:%S %Z')}")
     logger.info(f"Modus: {'dry-run' if args.dry_run else 'live'} | "
                 f"Retry: {'nee' if args.no_retry else 'ja'}")

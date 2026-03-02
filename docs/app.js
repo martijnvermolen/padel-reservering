@@ -787,7 +787,7 @@ function generateYaml() {
 
   // Add header comment
   return `# =============================================================================
-# Configuratie voor automatische padelbaan reservering - TPV Heksenwiel
+# Configuratie voor automatische padelbaan reservering
 # Bijgewerkt via het dashboard op ${new Date().toLocaleString('nl-NL')}
 # =============================================================================
 

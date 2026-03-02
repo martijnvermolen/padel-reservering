@@ -1,10 +1,10 @@
-# Automatische Padelbaan Reservering - TPV Heksenwiel
+# Automatische Padelbaan Reservering
 
-Automatisch een padelbaan reserveren bij TPV Heksenwiel via het KNLTB reserveringssysteem.
+Automatisch een padelbaan reserveren via het KNLTB reserveringssysteem.
 
 ## Wat doet deze applicatie?
 
-- Logt automatisch in op het KNLTB reserveringssysteem van TPV Heksenwiel
+- Logt automatisch in op het KNLTB reserveringssysteem
 - Reserveert een padelbaan op je gewenste dag(en) en tijd(en)
 - Voegt medespelers toe aan de reservering
 - **Retry-loop**: begint 5 minuten voor de 48-uur grens en probeert elke 10 seconden

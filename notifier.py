@@ -253,7 +253,7 @@ class EmailNotifier:
                 {fout_sectie_html}
             </div>
             <p style="color: #999; font-size: 12px; text-align: center; margin-top: 16px;">
-                Automatisch verstuurd door Padel Reservering Bot - TPV Heksenwiel
+                Automatisch verstuurd door Padel Reservering Bot
             </p>
         </body>
         </html>
