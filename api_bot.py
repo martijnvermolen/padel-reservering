@@ -18,8 +18,11 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import requests
+
+NL_TZ = ZoneInfo("Europe/Amsterdam")
 
 BASE_URL = "https://tpv-heksenwiel.knltb.site"
 
@@ -77,10 +80,22 @@ class ApiReserveringBot:
             "Login.Password": password,
         }, allow_redirects=True)
 
-        if resp.status_code != 200 or "input[type='password']" in resp.text.lower():
-            raise ReserveringError(f"Login mislukt (status {resp.status_code})")
+        page_lower = resp.text.lower()
 
-        self._log.info(f"Login geslaagd ({len(self._session.cookies)} cookies)")
+        if resp.status_code != 200:
+            raise ReserveringError(f"Login mislukt (HTTP {resp.status_code})")
+
+        # Detecteer of het login-formulier nog zichtbaar is (= login mislukt)
+        login_form_indicators = ['type="password"', "type='password'", 'login.password']
+        if any(indicator in page_lower for indicator in login_form_indicators):
+            self._log.error(f"Login-formulier nog zichtbaar na POST - credentials incorrect?")
+            self._log.debug(f"Response URL: {resp.url}")
+            raise ReserveringError("Login mislukt - login-formulier nog zichtbaar (controleer credentials)")
+
+        if len(self._session.cookies) == 0:
+            raise ReserveringError("Login mislukt - geen sessie-cookies ontvangen")
+
+        self._log.info(f"Login geslaagd ({len(self._session.cookies)} cookies, URL: {resp.url})")
 
     def _get_csrf(self, html: str) -> str:
         match = re.search(r'__RequestVerificationToken.*?value="([^"]+)"', html)
@@ -212,9 +227,10 @@ class ApiReserveringBot:
             data={"__RequestVerificationToken": csrf},
             allow_redirects=True,
         )
+        self._log.debug(f"ReservationsPlayersPost -> status {resp.status_code}, URL: {resp.url}")
         if resp.status_code != 200:
             raise ReserveringError(f"Spelers submiten mislukt (status {resp.status_code})")
-        self._log.info("Spelers ingediend, naar dag-selectie")
+        self._log.info(f"Spelers ingediend, naar dag-selectie (URL: {resp.url})")
         return resp
 
     def _selecteer_dag(self, target_date: datetime, tijden: list[str]) -> str:
@@ -222,16 +238,25 @@ class ApiReserveringBot:
         eerste_tijd = tijden[0] if tijden else "19:00"
         uur = int(eerste_tijd.split(":")[0])
         if uur < 12:
-            dagdeel_suffix = "T08:00:00Z"
+            dagdeel_uur = 8
         elif uur < 17:
-            dagdeel_suffix = "T12:00:00Z"
+            dagdeel_uur = 12
         else:
-            dagdeel_suffix = "T18:00:00Z"
+            dagdeel_uur = 18
 
-        selected_date = target_date.strftime(f"%Y-%m-%d") + dagdeel_suffix
+        # Gebruik lokale timezone offset (+01:00 of +02:00) i.p.v. Z (UTC)
+        dagdeel_dt = target_date.replace(
+            hour=dagdeel_uur, minute=0, second=0, microsecond=0, tzinfo=NL_TZ,
+        )
+        utc_offset = dagdeel_dt.strftime("%z")
+        tz_formatted = utc_offset[:3] + ":" + utc_offset[3:]  # "+0100" -> "+01:00"
+        dagdeel_suffix = f"T{dagdeel_uur:02d}:00:00{tz_formatted}"
+
+        selected_date = target_date.strftime("%Y-%m-%d") + dagdeel_suffix
 
         # Haal CSRF token van de ReservationsDay pagina
         day_page = self._session.get(f"{BASE_URL}/me/ReservationsDay")
+        self._log.debug(f"ReservationsDay GET -> status {day_page.status_code}, URL: {day_page.url}")
         csrf = self._get_csrf(day_page.text)
 
         self._log.info(f"Selecteer dag: {selected_date}")
@@ -244,50 +269,52 @@ class ApiReserveringBot:
             allow_redirects=True,
         )
 
+        self._log.debug(f"ReservationsDay POST -> status {resp.status_code}, URL: {resp.url}")
+
         if resp.status_code != 200 or "ReservationsCourt" not in resp.url:
+            self._log.error(f"Dag selectie response body (500 chars): {resp.text[:500]}")
             raise ReserveringError(
                 f"Dag selectie mislukt (status {resp.status_code}, url={resp.url})"
             )
 
-        self._log.info("Dag geselecteerd, op baan-pagina")
+        self._log.info(f"Dag geselecteerd, op baan-pagina (URL: {resp.url})")
         return resp.text
 
     def _parse_beschikbare_slots(self, court_html: str) -> list[dict]:
-        """Parse de baan-pagina voor beschikbare tijdslots."""
-        slots = []
-        # Zoek elementen met data-court en data-end-time (beschikbare slots)
-        # Beschikbare slots hebben class "timeincourt" zonder "disabled"
-        # We zoeken op data-court + data-end-time combinaties
-        pattern = re.compile(
-            r'data-court="([a-f0-9-]+)".*?'
-            r'class="timeincourt\s*".*?'  # Geen "disabled"
-            r'data-end-time="(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\+\d{2}:\d{2})"',
-            re.DOTALL,
-        )
+        """Parse de baan-pagina voor beschikbare tijdslots.
 
-        # Alternatieve aanpak: zoek per court-sectie
+        Alleen slots met EXACT class="timeincourt" (evt. met trailing whitespace)
+        worden meegenomen. Slots met extra classes zoals "disabled" worden
+        uitgefilterd via een negative lookahead.
+        """
+        slots = []
+        disabled_count = 0
+
         court_sections = re.split(r'data-court="([a-f0-9-]+)"', court_html)
         current_court = None
 
-        for i, section in enumerate(court_sections):
+        for section in court_sections:
             guid_match = re.match(r'^[a-f0-9-]+$', section.strip())
             if guid_match:
                 current_court = section.strip()
                 continue
 
             if current_court and current_court in PADEL_COURT_NAMES:
-                # Zoek beschikbare (niet-disabled) slots in deze sectie
-                # Beschikbare slots: class="timeincourt  " (zonder disabled)
-                # Met data-end-time
+                # Tel disabled slots voor diagnostiek
+                disabled_count += len(re.findall(
+                    r'class="timeincourt\s+disabled', section
+                ))
+
+                # Match ALLEEN beschikbare slots: "timeincourt" gevolgd door
+                # alleen whitespace tot de sluitquote (geen "disabled" e.d.)
                 slot_matches = re.finditer(
-                    r'class="timeincourt\s+"[^>]*'
+                    r'class="timeincourt(?!\s+disabled)\s*"[^>]*'
                     r'data-end-time="(\d{4}-\d{2}-\d{2} (\d{2}:\d{2}):\d{2}\+\d{2}:\d{2})"',
                     section,
                 )
                 for m in slot_matches:
                     end_time_full = m.group(1)
                     end_time_short = m.group(2)
-                    # Bereken starttijd (end_time - 15 min want slots zijn per 15 min)
                     slots.append({
                         "court_guid": current_court,
                         "court_name": PADEL_COURT_NAMES[current_court],
@@ -295,76 +322,101 @@ class ApiReserveringBot:
                         "end_time_short": end_time_short,
                     })
 
-        # Groepeer slots per court en bepaal beschikbare starttijden
-        # Een slot met end_time "20:30" en duur 60 min = start om 19:30
-        self._log.info(f"Gevonden beschikbare padel-slots: {len(slots)}")
+        self._log.info(
+            f"Beschikbare padel-slots: {len(slots)} "
+            f"(disabled/bezet gefilterd: {disabled_count})"
+        )
+        for s in slots:
+            self._log.debug(f"  {s['court_name']} end={s['end_time_short']}")
         return slots
 
     def _vind_beste_slot(
         self, slots: list[dict], tijden: list[str],
         baan_voorkeur: list[int], duur_min: int,
     ) -> dict | None:
-        """Vind het beste beschikbare slot op basis van tijd- en baanvoorkeur."""
+        """Vind het beste beschikbare slot op basis van tijd- en baanvoorkeur.
+
+        Controleert dat ALLE 15-minuten deelslots voor de volledige boekingsduur
+        (bijv. 4 stuks voor 60 min) aaneengesloten beschikbaar zijn op dezelfde baan.
+        """
         if not slots:
             return None
 
-        # Bouw een set van beschikbare starttijden per court
-        # end_time "2026-02-25 21:30:00+01:00" met duur 60 = start "20:30"
-        start_slots = []
+        benodigde_slots = duur_min // 15
+
+        # Bouw per baan een set van beschikbare 15-min slot-starttijden
+        # end_time "2026-02-25 21:30:00+01:00" → slot loopt 21:15 - 21:30
+        court_slot_starts: dict[str, set[datetime]] = {}
+        tz_suffix = None
         for slot in slots:
             try:
                 end_dt = datetime.strptime(
                     slot["end_time"].split("+")[0].strip(),
                     "%Y-%m-%d %H:%M:%S",
                 )
-                start_dt = end_dt - timedelta(minutes=15)  # Elk slot is 15 min
-                start_time_str = start_dt.strftime("%H:%M")
-
-                # Bereken het volledige tijdslot (startuur:minuut) dat we willen matchen
-                start_slots.append({
-                    **slot,
-                    "start_dt": start_dt,
-                    "start_time": start_time_str,
-                    "start_full": start_dt.strftime("%Y-%m-%d %H:%M:%S") + slot["end_time"][19:],
-                })
+                start_dt = end_dt - timedelta(minutes=15)
+                court_guid = slot["court_guid"]
+                court_slot_starts.setdefault(court_guid, set()).add(start_dt)
+                if tz_suffix is None:
+                    tz_suffix = slot["end_time"][19:]
             except (ValueError, IndexError):
                 continue
 
-        # Probeer elke voorkeurstijd
+        if tz_suffix is None:
+            tz_suffix = "+01:00"
+
         for gewenste_tijd in tijden:
-            # Zoek slots die beginnen op deze tijd
-            matching = [s for s in start_slots if s["start_time"] == gewenste_tijd]
-            if not matching:
-                self._log.debug(f"Tijd {gewenste_tijd} niet beschikbaar")
+            try:
+                g_uur, g_min = map(int, gewenste_tijd.split(":"))
+            except ValueError:
                 continue
 
-            # Check of er genoeg aaneengesloten slots zijn voor de gewenste duur
             for baan_nr in (baan_voorkeur or [1, 2, 3, 4]):
                 court_guid = PADEL_COURTS.get(baan_nr)
-                if not court_guid:
+                if not court_guid or court_guid not in court_slot_starts:
                     continue
 
-                baan_slots = [s for s in matching if s["court_guid"] == court_guid]
-                if baan_slots:
-                    slot = baan_slots[0]
-                    # Bereken eindtijd op basis van duur
-                    eind_dt = slot["start_dt"] + timedelta(minutes=duur_min)
-                    tz_suffix = slot["end_time"][19:]  # bijv. "+01:00"
-                    result = {
-                        "court_guid": court_guid,
-                        "court_name": PADEL_COURT_NAMES.get(court_guid, f"Padel {baan_nr}"),
-                        "start_time": gewenste_tijd,
-                        "start_full": slot["start_dt"].strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
-                        "end_full": eind_dt.strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
-                    }
-                    self._log.info(
-                        f"Beste slot: {result['start_time']} op {result['court_name']}"
+                beschikbaar = court_slot_starts[court_guid]
+
+                # Neem een willekeurige datum uit de beschikbare slots
+                sample_dt = next(iter(beschikbaar))
+                booking_start = sample_dt.replace(hour=g_uur, minute=g_min, second=0)
+
+                # Controleer of ALLE 15-min deelslots beschikbaar zijn
+                alle_vrij = all(
+                    (booking_start + timedelta(minutes=15 * i)) in beschikbaar
+                    for i in range(benodigde_slots)
+                )
+
+                if not alle_vrij:
+                    vrije = sum(
+                        1 for i in range(benodigde_slots)
+                        if (booking_start + timedelta(minutes=15 * i)) in beschikbaar
                     )
-                    return result
+                    self._log.debug(
+                        f"Tijd {gewenste_tijd} Padel {baan_nr}: "
+                        f"slechts {vrije}/{benodigde_slots} deelslots vrij"
+                    )
+                    continue
+
+                eind_dt = booking_start + timedelta(minutes=duur_min)
+                result = {
+                    "court_guid": court_guid,
+                    "court_name": PADEL_COURT_NAMES.get(court_guid, f"Padel {baan_nr}"),
+                    "start_time": gewenste_tijd,
+                    "start_full": booking_start.strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
+                    "end_full": eind_dt.strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
+                }
+                self._log.info(
+                    f"Beste slot: {result['start_time']} - "
+                    f"{eind_dt.strftime('%H:%M')} op {result['court_name']} "
+                    f"({benodigde_slots} aaneengesloten deelslots OK)"
+                )
+                return result
 
             self._log.debug(f"Tijd {gewenste_tijd} niet beschikbaar op voorkeursbanen")
 
-        self._log.warning("Geen geschikt slot gevonden")
+        self._log.warning("Geen geschikt slot gevonden voor de volledige boekingsduur")
         return None
 
     def _reserveer_baan(self, court_html: str, slot: dict, dry_run: bool = False) -> tuple[bool, str]:
@@ -390,6 +442,8 @@ class ApiReserveringBot:
             },
             allow_redirects=True,
         )
+
+        self._log.debug(f"ReservationsCourt POST -> status {resp.status_code}, URL: {resp.url}")
 
         if resp.status_code != 200:
             return (False, f"Court selectie mislukt (status {resp.status_code})")
@@ -452,6 +506,8 @@ class ApiReserveringBot:
             allow_redirects=True,
         )
 
+        self._log.debug(f"ReservationsConfirm POST -> status {resp.status_code}, URL: {resp.url}")
+
         page_text = resp.text.lower()
 
         success_indicators = [
@@ -507,8 +563,16 @@ class ApiReserveringBot:
         try:
             # Laad spelers-pagina en voeg spelers toe
             players_page = self._session.get(f"{BASE_URL}/me/ReservationsPlayers")
+            self._log.debug(
+                f"ReservationsPlayers GET -> status {players_page.status_code}, "
+                f"URL: {players_page.url}"
+            )
             if players_page.status_code != 200:
                 return f"Kon spelers-pagina niet laden (status {players_page.status_code})"
+
+            # Detecteer redirect naar login (= sessie verlopen)
+            if 'type="password"' in players_page.text.lower():
+                return "Sessie verlopen - login-pagina getoond i.p.v. spelers-pagina"
 
             csrf = self._get_csrf(players_page.text)
 
