@@ -1,6 +1,6 @@
 # =============================================================================
 # Configuratie voor automatische padelbaan reservering
-# Bijgewerkt via het dashboard op 24-2-2026, 19:58:55
+# Bijgewerkt via het dashboard op 23-3-2026, 20:28:38
 # =============================================================================
 
 credentials:
@@ -11,7 +11,6 @@ reservering:
   dagen:
     - dag: 1
       tijden:
-        - "20:30"
         - "21:30"
     - dag: 6
       tijden:
