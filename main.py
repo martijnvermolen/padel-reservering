@@ -156,11 +156,11 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None
     except (ValueError, IndexError):
         target_met_tijd = target.replace(hour=19, minute=0)
 
-    # Accepteer targets tot 25 min voorbij de 48u-grens.
-    # Strak genoeg om verkeerde-seizoen cron-triggers te weigeren (die ~80 min
-    # te vroeg starten), maar ruim genoeg voor de correcte trigger (20 min vroeg)
-    # en GHA-vertragingen.
-    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=25)
+    # Accepteer targets tot 35 min voorbij de 48u-grens.
+    # Verkeerde-seizoen triggers komen ~60-80 min te vroeg (winter) of ~40 min
+    # te laat (zomer) en worden dus nog steeds geweerd. De correcte trigger
+    # start 20 min voor het venster, maar GHA kan tot 15 min vroeger starten.
+    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=35)
     if target_met_tijd > max_tijdstip:
         return None
 
