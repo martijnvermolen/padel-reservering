@@ -17,7 +17,7 @@ import html as html_mod
 import logging
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import requests
@@ -233,7 +233,7 @@ class ApiReserveringBot:
         self._log.info(f"Spelers ingediend, naar dag-selectie (URL: {resp.url})")
         return resp
 
-    def _selecteer_dag(self, target_date: datetime, tijden: list[str]) -> str:
+    def _selecteer_dag(self, target_date: date, tijden: list[str]) -> str:
         """Selecteer dag + dagdeel en return de HTML van de baan-pagina."""
         eerste_tijd = tijden[0] if tijden else "19:00"
         uur = int(eerste_tijd.split(":")[0])
@@ -244,10 +244,16 @@ class ApiReserveringBot:
         else:
             dagdeel_uur = 18
 
-        # Gebruik lokale timezone offset (+01:00 of +02:00) i.p.v. Z (UTC)
-        dagdeel_dt = target_date.replace(
-            hour=dagdeel_uur, minute=0, second=0, microsecond=0, tzinfo=NL_TZ,
-        )
+        # Construeer TZ-aware datetime via constructor (niet replace()) voor DST-safety
+        if isinstance(target_date, date) and not isinstance(target_date, datetime):
+            dagdeel_dt = datetime(
+                target_date.year, target_date.month, target_date.day,
+                dagdeel_uur, 0, 0, tzinfo=NL_TZ,
+            )
+        else:
+            dagdeel_dt = target_date.replace(
+                hour=dagdeel_uur, minute=0, second=0, microsecond=0, tzinfo=NL_TZ,
+            )
         utc_offset = dagdeel_dt.strftime("%z")
         tz_formatted = utc_offset[:3] + ":" + utc_offset[3:]  # "+0100" -> "+01:00"
         dagdeel_suffix = f"T{dagdeel_uur:02d}:00:00{tz_formatted}"
@@ -326,6 +332,14 @@ class ApiReserveringBot:
             f"Beschikbare padel-slots: {len(slots)} "
             f"(disabled/bezet gefilterd: {disabled_count})"
         )
+
+        if len(slots) == 0 and disabled_count > 0:
+            self._log.warning(
+                f"0 beschikbare slots maar {disabled_count} disabled - "
+                f"HTML-dump voor diagnose (eerste 1000 tekens):\n"
+                f"{court_html[:1000]}"
+            )
+
         for s in slots:
             self._log.debug(f"  {s['court_name']} end={s['end_time_short']}")
         return slots
@@ -551,7 +565,7 @@ class ApiReserveringBot:
     # =========================================================================
 
     def voorbereiden(
-        self, target_date: datetime, tijden: list[str], spelers: list[str],
+        self, target_date: date, tijden: list[str], spelers: list[str],
     ) -> str | None:
         """
         Bereid de reservering voor: login is al gedaan in start().
@@ -596,7 +610,7 @@ class ApiReserveringBot:
 
     def probeer_reserveer(
         self,
-        target_date: datetime,
+        target_date: date,
         tijden: list[str],
         spelers: list[str],
         baan_voorkeur: list = None,
@@ -676,7 +690,7 @@ class ApiReserveringBot:
 
     def reserveer(
         self,
-        target_date: datetime,
+        target_date: date,
         tijden: list[str],
         spelers: list[str],
         baan_voorkeur: list = None,

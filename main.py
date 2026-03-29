@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -47,7 +47,7 @@ DAGNAMEN = {
 # Timing configuratie
 RETRY_INTERVAL_SEC = 10     # Seconden tussen pogingen
 VOORBEREIDING_MIN = 3       # Minuten voor de 48u-grens dat we inloggen en spelers selecteren
-NA_VENSTER_MAX_MIN = 3      # Minuten na het 48u-venster dat we blijven proberen
+NA_VENSTER_MAX_MIN = 5      # Minuten na het 48u-venster dat we blijven proberen
 
 
 def setup_logging(verbose: bool = False):
@@ -123,38 +123,44 @@ def vind_reserveerbare_dagen(config: dict) -> list[dict]:
     return reserveerbaar
 
 
-def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None:
+def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> date | None:
     """
     Bereken de eerstvolgende datum voor een gewenste dag.
 
+    Geeft een date-object terug (geen datetime) om DST-problemen met
+    datetime.replace() te voorkomen. Timezone-aware datetimes worden
+    pas later geconstrueerd via datetime(..., tzinfo=NL_TZ).
+
     Returns:
-        De target datum, of None als buiten de reserveringsperiode.
+        De target datum als date, of None als buiten de reserveringsperiode.
     """
     nu = datetime.now(NL_TZ)
-    vandaag = nu.replace(hour=0, minute=0, second=0, microsecond=0)
+    vandaag_date = nu.date()
     gewenste_dag = dag_config["dag"]
-    huidige_dag = vandaag.weekday()
+    huidige_dag = vandaag_date.weekday()
 
     dagen_tot = (gewenste_dag - huidige_dag) % 7
     if dagen_tot == 0:
-        # Vandaag: controleer of het tijdstip nog in de toekomst is
         eerste_tijd = dag_config.get("tijden", ["19:00"])[0]
         try:
             uur, minuut = map(int, eerste_tijd.split(":"))
             if nu.hour > uur or (nu.hour == uur and nu.minute >= minuut):
-                dagen_tot = 7  # Vandaag is al geweest, pak volgende week
+                dagen_tot = 7
         except ValueError:
             dagen_tot = 7
 
-    target = vandaag + timedelta(days=dagen_tot)
+    target_date = vandaag_date + timedelta(days=dagen_tot)
 
-    # Controleer of het binnen de reserveringsperiode valt
+    # Construeer een correcte TZ-aware datetime voor de acceptatie-check
     eerste_tijd = dag_config.get("tijden", ["19:00"])[0]
     try:
         uur, minuut = map(int, eerste_tijd.split(":"))
-        target_met_tijd = target.replace(hour=uur, minute=minuut)
     except (ValueError, IndexError):
-        target_met_tijd = target.replace(hour=19, minute=0)
+        uur, minuut = 19, 0
+    target_met_tijd = datetime(
+        target_date.year, target_date.month, target_date.day,
+        uur, minuut, tzinfo=NL_TZ,
+    )
 
     # Accepteer targets tot 35 min voorbij de 48u-grens.
     # Verkeerde-seizoen triggers komen ~60-80 min te vroeg (winter) of ~40 min
@@ -164,7 +170,7 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> datetime | None
     if target_met_tijd > max_tijdstip:
         return None
 
-    return target
+    return target_date
 
 
 def get_spelers(config: dict, dag: int) -> list[str]:
@@ -205,9 +211,13 @@ def splits_baan_voorkeur(baan_voorkeur: list[int], n_bots: int = 2) -> list[list
     return delen
 
 
-def bereken_venster_open(target_date: datetime, eerste_tijd: str, uren_vooruit: int) -> datetime:
+def bereken_venster_open(target_date: date, eerste_tijd: str, uren_vooruit: int) -> datetime:
     """
     Bereken het exacte moment waarop het reserveringsvenster opengaat.
+
+    Accepteert zowel date als datetime. Bij een date-object wordt een
+    correcte TZ-aware datetime geconstrueerd via de constructor (geen
+    replace()) om DST-problemen te voorkomen.
 
     Returns:
         Timezone-aware datetime van het moment waarop het venster opent.
@@ -217,9 +227,15 @@ def bereken_venster_open(target_date: datetime, eerste_tijd: str, uren_vooruit: 
     except ValueError:
         uur, minuut = 19, 0
 
-    reservering_dt = target_date.replace(hour=uur, minute=minuut, second=0, microsecond=0)
-    if reservering_dt.tzinfo is None:
-        reservering_dt = reservering_dt.replace(tzinfo=NL_TZ)
+    if isinstance(target_date, date) and not isinstance(target_date, datetime):
+        reservering_dt = datetime(
+            target_date.year, target_date.month, target_date.day,
+            uur, minuut, tzinfo=NL_TZ,
+        )
+    else:
+        reservering_dt = target_date.replace(hour=uur, minute=minuut, second=0, microsecond=0)
+        if reservering_dt.tzinfo is None:
+            reservering_dt = reservering_dt.replace(tzinfo=NL_TZ)
     return reservering_dt - timedelta(hours=uren_vooruit)
 
 
