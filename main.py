@@ -47,7 +47,7 @@ DAGNAMEN = {
 # Timing configuratie
 RETRY_INTERVAL_SEC = 10     # Seconden tussen pogingen
 VOORBEREIDING_MIN = 3       # Minuten voor de 48u-grens dat we inloggen en spelers selecteren
-NA_VENSTER_MAX_MIN = 5      # Minuten na het 48u-venster dat we blijven proberen
+NA_VENSTER_MAX_MIN = 15     # Minuten na het 48u-venster dat we blijven proberen
 
 
 def setup_logging(verbose: bool = False):
@@ -616,6 +616,58 @@ def sync_spelers(config: dict):
         logger.debug(f"  {naam}")
 
 
+def dump_court_html(config: dict):
+    """Dump de court-pagina HTML naar bestand voor diagnose."""
+    logger = logging.getLogger(__name__)
+    logger.info("=== HTML Dump Modus ===")
+
+    dagen_config = config.get("reservering", {}).get("dagen", [])
+    if not dagen_config:
+        logger.error("Geen dagen geconfigureerd")
+        return
+
+    dag_config = dagen_config[0]
+    dag = dag_config["dag"]
+    tijden = dag_config.get("tijden", ["19:00"])
+    uren_vooruit = config.get("reservering", {}).get("uren_vooruit", 48)
+    spelers = get_spelers(config, dag)
+
+    from api_bot import ApiReserveringBot
+    bot = ApiReserveringBot(config, label="dump")
+    try:
+        bot.start()
+
+        # Bereken target datum (forceer vandaag + dagen_tot)
+        nu = datetime.now(NL_TZ)
+        vandaag = nu.date()
+        gewenste_dag = dag_config["dag"]
+        dagen_tot = (gewenste_dag - vandaag.weekday()) % 7
+        if dagen_tot == 0:
+            dagen_tot = 7
+        target_date = vandaag + timedelta(days=dagen_tot)
+
+        logger.info(f"Target: {DAGNAMEN.get(dag, dag)} {target_date} {tijden}")
+
+        fout = bot.voorbereiden(target_date, tijden, spelers)
+        if fout:
+            logger.error(f"Voorbereiding mislukt: {fout}")
+            return
+
+        court_html = bot._selecteer_dag(target_date, tijden)
+
+        dump_file = BASE_DIR / "court_dump.html"
+        with open(dump_file, "w", encoding="utf-8") as f:
+            f.write(court_html)
+        logger.info(f"Court HTML gedumpt naar: {dump_file} ({len(court_html)} bytes)")
+
+        bot._parse_beschikbare_slots(court_html)
+
+    except Exception as e:
+        logger.error(f"Dump mislukt: {e}", exc_info=True)
+    finally:
+        bot.stop()
+
+
 def main():
     """Hoofdfunctie."""
     parser = argparse.ArgumentParser(
@@ -647,6 +699,11 @@ def main():
         action="store_true",
         help="Haal spelerslijst op van KNLTB en sla op als players.json",
     )
+    parser.add_argument(
+        "--dump-html",
+        action="store_true",
+        help="Dump de court-pagina HTML naar bestand voor diagnose (geen reservering)",
+    )
     args = parser.parse_args()
 
     # Setup
@@ -672,6 +729,11 @@ def main():
     # Sync spelers modus
     if args.sync_spelers:
         sync_spelers(config)
+        sys.exit(0)
+
+    # Dump HTML modus (diagnose)
+    if args.dump_html:
+        dump_court_html(config)
         sys.exit(0)
 
     # Bepaal welke dag(en) we moeten reserveren

@@ -78,3 +78,12 @@ jobs:
           name: reservering-log-${{ github.run_id }}
           path: reservering.log
           retention-days: 7
+
+      - name: Upload HTML dump (indien aanwezig)
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: court-html-${{ github.run_id }}
+          path: court_dump.html
+          if-no-files-found: ignore
+          retention-days: 7

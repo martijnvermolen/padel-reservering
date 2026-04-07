@@ -1,6 +1,7 @@
 # Screenshots en logs
 screenshots/
 reservering.log
+court_dump.html
 
 # Python
 __pycache__/

@@ -284,17 +284,37 @@ class ApiReserveringBot:
             )
 
         self._log.info(f"Dag geselecteerd, op baan-pagina (URL: {resp.url})")
+
+        # Dump court HTML voor diagnose
+        try:
+            from pathlib import Path
+            dump_path = Path(__file__).parent / "court_dump.html"
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(resp.text)
+            self._log.debug(f"Court HTML gedumpt naar: {dump_path}")
+        except Exception as e:
+            self._log.debug(f"Court HTML dump mislukt: {e}")
+
         return resp.text
 
     def _parse_beschikbare_slots(self, court_html: str) -> list[dict]:
         """Parse de baan-pagina voor beschikbare tijdslots.
 
-        Alleen slots met EXACT class="timeincourt" (evt. met trailing whitespace)
-        worden meegenomen. Slots met extra classes zoals "disabled" worden
-        uitgefilterd via een negative lookahead.
+        Robuuste parsing die werkt ongeacht:
+        - Extra CSS classes op timeincourt elementen (bijv. "timeincourt available")
+        - data-end-time op hetzelfde of een child-element
+        - Variatie in datum/tijd formaat (space vs T separator)
+        - Variatie in attribuut-volgorde
         """
         slots = []
         disabled_count = 0
+        no_endtime_count = 0
+
+        # Diagnostiek: vind alle timeincourt tags voor analyse
+        all_tic_tags = re.findall(r'<[^>]*\btimeincourt\b[^>]*>', court_html)
+        self._log.debug(f"Totaal timeincourt tags in HTML: {len(all_tic_tags)}")
+        for i, tag in enumerate(all_tic_tags[:5]):
+            self._log.debug(f"  Tag {i}: {tag[:300]}")
 
         court_sections = re.split(r'data-court="([a-f0-9-]+)"', court_html)
         current_court = None
@@ -306,43 +326,109 @@ class ApiReserveringBot:
                 continue
 
             if current_court and current_court in PADEL_COURT_NAMES:
-                # Tel disabled slots voor diagnostiek
-                disabled_count += len(re.findall(
-                    r'class="timeincourt\s+disabled', section
-                ))
+                for m in re.finditer(r'class="([^"]*\btimeincourt\b[^"]*)"', section):
+                    classes = m.group(1)
 
-                # Match ALLEEN beschikbare slots: "timeincourt" gevolgd door
-                # alleen whitespace tot de sluitquote (geen "disabled" e.d.)
-                slot_matches = re.finditer(
-                    r'class="timeincourt(?!\s+disabled)\s*"[^>]*'
-                    r'data-end-time="(\d{4}-\d{2}-\d{2} (\d{2}:\d{2}):\d{2}\+\d{2}:\d{2})"',
-                    section,
-                )
-                for m in slot_matches:
-                    end_time_full = m.group(1)
-                    end_time_short = m.group(2)
-                    slots.append({
-                        "court_guid": current_court,
-                        "court_name": PADEL_COURT_NAMES[current_court],
-                        "end_time": end_time_full,
-                        "end_time_short": end_time_short,
-                    })
+                    # Zoek de volledige opening tag
+                    tag_start = section.rfind('<', 0, m.start())
+                    tag_end = section.find('>', m.end())
+                    if tag_start == -1 or tag_end == -1:
+                        continue
+
+                    tag_html = section[tag_start:tag_end + 1]
+
+                    # Zoek data-end-time (of data-endtime) in deze tag
+                    end_time_match = re.search(
+                        r'data-end-?time="([^"]+)"', tag_html
+                    )
+                    if not end_time_match:
+                        # Zoek in child elementen (tot 500 chars na de tag)
+                        child_end = min(len(section), tag_end + 500)
+                        child_html = section[tag_end + 1:child_end]
+                        end_time_match = re.search(
+                            r'data-end-?time="([^"]+)"', child_html
+                        )
+
+                    if not end_time_match:
+                        no_endtime_count += 1
+                        continue
+
+                    end_time_raw = end_time_match.group(1)
+
+                    if 'disabled' in classes.split():
+                        disabled_count += 1
+                        continue
+
+                    # Extract HH:MM uit het tijdstip
+                    time_match = re.search(r'(\d{2}:\d{2})', end_time_raw)
+                    if time_match:
+                        slots.append({
+                            "court_guid": current_court,
+                            "court_name": PADEL_COURT_NAMES[current_court],
+                            "end_time": end_time_raw,
+                            "end_time_short": time_match.group(1),
+                        })
 
         self._log.info(
             f"Beschikbare padel-slots: {len(slots)} "
-            f"(disabled/bezet gefilterd: {disabled_count})"
+            f"(disabled/bezet: {disabled_count}, "
+            f"zonder end-time: {no_endtime_count})"
         )
 
-        if len(slots) == 0 and disabled_count > 0:
+        if len(slots) == 0:
             self._log.warning(
-                f"0 beschikbare slots maar {disabled_count} disabled - "
-                f"HTML-dump voor diagnose (eerste 1000 tekens):\n"
-                f"{court_html[:1000]}"
+                f"0 beschikbare slots (disabled: {disabled_count}, "
+                f"zonder end-time: {no_endtime_count})"
             )
+            if all_tic_tags:
+                self._log.warning("Timeincourt tags voor diagnose:")
+                for i, tag in enumerate(all_tic_tags[:5]):
+                    self._log.warning(f"  [{i}]: {tag[:300]}")
+
+            # Dump HTML context rond eerste timeincourt element
+            tic_idx = court_html.find('timeincourt')
+            if tic_idx >= 0:
+                start = max(0, tic_idx - 100)
+                end = min(len(court_html), tic_idx + 600)
+                self._log.warning(
+                    f"HTML context rond eerste timeincourt:\n"
+                    f"{court_html[start:end]}"
+                )
+
+            # Als alle slots disabled zijn, kan dit duiden op JS-afhankelijkheid
+            if disabled_count > 0 and no_endtime_count == 0:
+                self._log.warning(
+                    "ALLE timeincourt slots zijn disabled. "
+                    "Mogelijke oorzaken:\n"
+                    "  1. Banen zijn daadwerkelijk allemaal bezet\n"
+                    "  2. De site gebruikt JavaScript om slots te activeren "
+                    "(HTTP API kan dit niet detecteren)\n"
+                    "  3. Het 48u-venster is nog niet open op de server"
+                )
 
         for s in slots:
             self._log.debug(f"  {s['court_name']} end={s['end_time_short']}")
         return slots
+
+    def _parse_end_time(self, end_time_raw: str) -> datetime | None:
+        """Parse een end_time string flexibel (diverse formaten)."""
+        dt_str = re.sub(r'[+-]\d{2}:?\d{2}$', '', end_time_raw).strip()
+        dt_str = dt_str.replace('T', ' ')
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(dt_str, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _detect_time_format(self, end_time_raw: str) -> tuple[str, str]:
+        """Detecteer het datum/tijd formaat en timezone suffix uit een end_time string."""
+        date_sep = 'T' if 'T' in end_time_raw else ' '
+        tz_match = re.search(r'([+-]\d{2}:?\d{2})$', end_time_raw)
+        tz_suffix = tz_match.group(1) if tz_match else "+01:00"
+        if len(tz_suffix) == 5 and ':' not in tz_suffix[1:]:
+            tz_suffix = tz_suffix[:3] + ":" + tz_suffix[3:]
+        return date_sep, tz_suffix
 
     def _vind_beste_slot(
         self, slots: list[dict], tijden: list[str],
@@ -358,26 +444,22 @@ class ApiReserveringBot:
 
         benodigde_slots = duur_min // 15
 
+        # Detecteer formaat uit de eerste slot
+        date_sep, tz_suffix = self._detect_time_format(slots[0]["end_time"])
+
         # Bouw per baan een set van beschikbare 15-min slot-starttijden
-        # end_time "2026-02-25 21:30:00+01:00" → slot loopt 21:15 - 21:30
         court_slot_starts: dict[str, set[datetime]] = {}
-        tz_suffix = None
         for slot in slots:
             try:
-                end_dt = datetime.strptime(
-                    slot["end_time"].split("+")[0].strip(),
-                    "%Y-%m-%d %H:%M:%S",
-                )
+                end_dt = self._parse_end_time(slot["end_time"])
+                if end_dt is None:
+                    self._log.warning(f"Kan end_time niet parsen: {slot['end_time']}")
+                    continue
                 start_dt = end_dt - timedelta(minutes=15)
                 court_guid = slot["court_guid"]
                 court_slot_starts.setdefault(court_guid, set()).add(start_dt)
-                if tz_suffix is None:
-                    tz_suffix = slot["end_time"][19:]
             except (ValueError, IndexError):
                 continue
-
-        if tz_suffix is None:
-            tz_suffix = "+01:00"
 
         for gewenste_tijd in tijden:
             try:
@@ -392,11 +474,9 @@ class ApiReserveringBot:
 
                 beschikbaar = court_slot_starts[court_guid]
 
-                # Neem een willekeurige datum uit de beschikbare slots
                 sample_dt = next(iter(beschikbaar))
                 booking_start = sample_dt.replace(hour=g_uur, minute=g_min, second=0)
 
-                # Controleer of ALLE 15-min deelslots beschikbaar zijn
                 alle_vrij = all(
                     (booking_start + timedelta(minutes=15 * i)) in beschikbaar
                     for i in range(benodigde_slots)
@@ -414,12 +494,13 @@ class ApiReserveringBot:
                     continue
 
                 eind_dt = booking_start + timedelta(minutes=duur_min)
+                fmt_str = f"%Y-%m-%d{date_sep}%H:%M:%S"
                 result = {
                     "court_guid": court_guid,
                     "court_name": PADEL_COURT_NAMES.get(court_guid, f"Padel {baan_nr}"),
                     "start_time": gewenste_tijd,
-                    "start_full": booking_start.strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
-                    "end_full": eind_dt.strftime("%Y-%m-%d %H:%M:%S") + tz_suffix,
+                    "start_full": booking_start.strftime(fmt_str) + tz_suffix,
+                    "end_full": eind_dt.strftime(fmt_str) + tz_suffix,
                 }
                 self._log.info(
                     f"Beste slot: {result['start_time']} - "
