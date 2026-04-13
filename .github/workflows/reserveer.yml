@@ -1,23 +1,9 @@
 name: Padel Reservering
 
 on:
-  schedule:
-    # Cron tijden in UTC. Nederland is UTC+1 (winter) / UTC+2 (zomer).
-    # Per reservering TWEE triggers (winter + zomer) zodat de bot altijd
-    # ~20 min voor het 48u-venster start, ongeacht het seizoen.
-    # De verkeerde-seizoen trigger detecteert automatisch dat er niets
-    # te reserveren is en stopt direct. GitHub Actions cron kan 5-30 min
-    # vertraagd zijn, dus 20 min buffer is noodzakelijk.
-    #
-    # DINSDAG 21:30 -> 48u eerder = ZONDAG 21:30 NL -> start 21:10 NL
-    - cron: '10 19 * * 0'    # zomer (UTC+2): zo 21:10 CEST
-    - cron: '10 20 * * 0'    # winter (UTC+1): zo 21:10 CET
-    #
-    # ZONDAG 19:30 -> 48u eerder = VRIJDAG 19:30 NL -> start 19:10 NL
-    - cron: '10 17 * * 5'    # zomer (UTC+2): vr 19:10 CEST
-    - cron: '10 18 * * 5'    # winter (UTC+1): vr 19:10 CET
-
-  workflow_dispatch:            # Handmatig triggeren mogelijk via GitHub UI
+  # Automatische schedule uitgeschakeld: de Raspberry Pi draait de bot via crontab.
+  # Behoud workflow_dispatch als noodknop voor handmatig triggeren.
+  workflow_dispatch:
 
 concurrency:
   group: padel-reservering

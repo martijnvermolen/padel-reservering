@@ -2,6 +2,9 @@
 screenshots/
 reservering.log
 court_dump.html
+confirm_dump.html
+cron.log
+cron.log.old
 
 # Credentials
 .env

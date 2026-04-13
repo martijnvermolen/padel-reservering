@@ -10,14 +10,14 @@ Flow:
   3. POST /me/ReservationsPlayersPost    -> Spelers bevestigen
   4. POST /me/ReservationsDay            -> Dag + dagdeel selecteren
   5. POST /me/ReservationsCourt          -> Baan + tijd selecteren
-  6. POST /me/ReservationsConfirm        -> Reservering bevestigen
+  6. POST /Ajax/Profile/SaveReservation  -> Reservering bevestigen (AJAX)
 """
 
 import html as html_mod
 import logging
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import requests
@@ -52,7 +52,7 @@ class _TimeoutSession(requests.Session):
 class ApiReserveringBot:
     """Directe HTTP-gebaseerde padelbaan reservering via KNLTB.site."""
 
-    def __init__(self, config: dict, verbose_screenshots: bool = False, label: str = ""):
+    def __init__(self, config: dict, label: str = ""):
         self.config = config
         self.label = label
         self._log = logging.getLogger(f"{__name__}.{label}" if label else __name__)
@@ -309,218 +309,130 @@ class ApiReserveringBot:
     def _parse_beschikbare_slots(self, court_html: str) -> list[dict]:
         """Parse de baan-pagina voor beschikbare tijdslots.
 
-        Robuuste parsing die werkt ongeacht:
-        - Extra CSS classes op timeincourt elementen (bijv. "timeincourt available")
-        - data-end-time op hetzelfde of een child-element
-        - Variatie in datum/tijd formaat (space vs T separator)
-        - Variatie in attribuut-volgorde
+        HTML structuur (KNLTB site):
+            <div class="timeincourt [disabled]" data-hour="N">
+                <select data-court="GUID" [disabled]>
+                    <option value="START_DT" data-end-time="END_DT" data-price="...">HH:MM</option>
+                    ...
+                </select>
+            </div>
+
+        Elke <option> is een boekbaar tijdslot met start- en eindtijd.
         """
         slots = []
         disabled_count = 0
-        no_endtime_count = 0
+        empty_count = 0
 
-        # Diagnostiek: vind alle timeincourt tags voor analyse
-        all_tic_tags = re.findall(r'<[^>]*\btimeincourt\b[^>]*>', court_html)
-        self._log.debug(f"Totaal timeincourt tags in HTML: {len(all_tic_tags)}")
-        for i, tag in enumerate(all_tic_tags[:5]):
-            self._log.debug(f"  Tag {i}: {tag[:300]}")
+        for tic_match in re.finditer(
+            r'<div\b[^>]*class="([^"]*\btimeincourt\b[^"]*)"[^>]*>(.*?)</div>',
+            court_html, re.DOTALL,
+        ):
+            tic_classes = tic_match.group(1)
+            tic_inner = tic_match.group(2)
 
-        court_sections = re.split(r'data-court="([a-f0-9-]+)"', court_html)
-        current_court = None
-
-        for section in court_sections:
-            guid_match = re.match(r'^[a-f0-9-]+$', section.strip())
-            if guid_match:
-                current_court = section.strip()
+            if 'disabled' in tic_classes.split():
+                disabled_count += 1
                 continue
 
-            if current_court and current_court in PADEL_COURT_NAMES:
-                for m in re.finditer(r'class="([^"]*\btimeincourt\b[^"]*)"', section):
-                    classes = m.group(1)
+            select_match = re.search(
+                r'<select\b([^>]*)data-court="([a-f0-9-]+)"([^>]*)>(.*?)</select>',
+                tic_inner, re.DOTALL,
+            )
+            if not select_match:
+                continue
 
-                    # Zoek de volledige opening tag
-                    tag_start = section.rfind('<', 0, m.start())
-                    tag_end = section.find('>', m.end())
-                    if tag_start == -1 or tag_end == -1:
-                        continue
+            select_pre = select_match.group(1)
+            court_guid = select_match.group(2)
+            select_post = select_match.group(3)
+            select_inner = select_match.group(4)
 
-                    tag_html = section[tag_start:tag_end + 1]
+            if court_guid not in PADEL_COURT_NAMES:
+                continue
 
-                    # Zoek data-end-time (of data-endtime) in deze tag
-                    end_time_match = re.search(
-                        r'data-end-?time="([^"]+)"', tag_html
-                    )
-                    if not end_time_match:
-                        # Zoek in child elementen (tot 500 chars na de tag)
-                        child_end = min(len(section), tag_end + 500)
-                        child_html = section[tag_end + 1:child_end]
-                        end_time_match = re.search(
-                            r'data-end-?time="([^"]+)"', child_html
-                        )
+            if 'disabled' in (select_pre + select_post):
+                disabled_count += 1
+                continue
 
-                    if not end_time_match:
-                        no_endtime_count += 1
-                        continue
+            options_found = False
+            for opt_match in re.finditer(r'<option\b([^>]*)>([^<]*)</option>', select_inner):
+                opt_attrs = opt_match.group(1)
 
-                    end_time_raw = end_time_match.group(1)
+                value_m = re.search(r'value="([^"]+)"', opt_attrs)
+                end_m = re.search(r'data-end-?time="([^"]+)"', opt_attrs)
+                if not value_m or not end_m:
+                    continue
 
-                    if 'disabled' in classes.split():
-                        disabled_count += 1
-                        continue
+                start_full = value_m.group(1).strip()
+                end_full = end_m.group(1).strip()
+                start_short = re.search(r'(\d{2}:\d{2})', start_full)
+                end_short = re.search(r'(\d{2}:\d{2})', end_full)
 
-                    # Extract HH:MM uit het tijdstip
-                    time_match = re.search(r'(\d{2}:\d{2})', end_time_raw)
-                    if time_match:
-                        slots.append({
-                            "court_guid": current_court,
-                            "court_name": PADEL_COURT_NAMES[current_court],
-                            "end_time": end_time_raw,
-                            "end_time_short": time_match.group(1),
-                        })
+                if start_short and end_short:
+                    options_found = True
+                    slots.append({
+                        "court_guid": court_guid,
+                        "court_name": PADEL_COURT_NAMES[court_guid],
+                        "start_full": start_full,
+                        "end_full": end_full,
+                        "start_time": start_short.group(1),
+                        "end_time": end_full,
+                        "end_time_short": end_short.group(1),
+                    })
+
+            if not options_found:
+                empty_count += 1
 
         self._log.info(
             f"Beschikbare padel-slots: {len(slots)} "
-            f"(disabled/bezet: {disabled_count}, "
-            f"zonder end-time: {no_endtime_count})"
+            f"(disabled: {disabled_count}, leeg: {empty_count})"
         )
 
         if len(slots) == 0:
+            all_tic_tags = re.findall(r'<[^>]*\btimeincourt\b[^>]*>', court_html)
             self._log.warning(
-                f"0 beschikbare slots (disabled: {disabled_count}, "
-                f"zonder end-time: {no_endtime_count})"
+                f"0 beschikbare slots "
+                f"(disabled: {disabled_count}, leeg: {empty_count}, "
+                f"totaal timeincourt: {len(all_tic_tags)})"
             )
-            if all_tic_tags:
-                self._log.warning("Timeincourt tags voor diagnose:")
-                for i, tag in enumerate(all_tic_tags[:5]):
-                    self._log.warning(f"  [{i}]: {tag[:300]}")
-
-            # Dump HTML context rond eerste timeincourt element
-            tic_idx = court_html.find('timeincourt')
-            if tic_idx >= 0:
-                start = max(0, tic_idx - 100)
-                end = min(len(court_html), tic_idx + 600)
-                self._log.warning(
-                    f"HTML context rond eerste timeincourt:\n"
-                    f"{court_html[start:end]}"
-                )
-
-            # Als alle slots disabled zijn, kan dit duiden op JS-afhankelijkheid
-            if disabled_count > 0 and no_endtime_count == 0:
-                self._log.warning(
-                    "ALLE timeincourt slots zijn disabled. "
-                    "Mogelijke oorzaken:\n"
-                    "  1. Banen zijn daadwerkelijk allemaal bezet\n"
-                    "  2. De site gebruikt JavaScript om slots te activeren "
-                    "(HTTP API kan dit niet detecteren)\n"
-                    "  3. Het 48u-venster is nog niet open op de server"
-                )
 
         for s in slots:
-            self._log.debug(f"  {s['court_name']} end={s['end_time_short']}")
+            self._log.debug(f"  {s['court_name']} {s['start_time']}-{s['end_time_short']}")
         return slots
-
-    def _parse_end_time(self, end_time_raw: str) -> datetime | None:
-        """Parse een end_time string flexibel (diverse formaten)."""
-        dt_str = re.sub(r'[+-]\d{2}:?\d{2}$', '', end_time_raw).strip()
-        dt_str = dt_str.replace('T', ' ')
-        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
-            try:
-                return datetime.strptime(dt_str, fmt)
-            except ValueError:
-                continue
-        return None
-
-    def _detect_time_format(self, end_time_raw: str) -> tuple[str, str]:
-        """Detecteer het datum/tijd formaat en timezone suffix uit een end_time string."""
-        date_sep = 'T' if 'T' in end_time_raw else ' '
-        tz_match = re.search(r'([+-]\d{2}:?\d{2})$', end_time_raw)
-        tz_suffix = tz_match.group(1) if tz_match else "+01:00"
-        if len(tz_suffix) == 5 and ':' not in tz_suffix[1:]:
-            tz_suffix = tz_suffix[:3] + ":" + tz_suffix[3:]
-        return date_sep, tz_suffix
 
     def _vind_beste_slot(
         self, slots: list[dict], tijden: list[str],
-        baan_voorkeur: list[int], duur_min: int,
+        baan_voorkeur: list[int],
     ) -> dict | None:
         """Vind het beste beschikbare slot op basis van tijd- en baanvoorkeur.
 
-        Controleert dat ALLE 15-minuten deelslots voor de volledige boekingsduur
-        (bijv. 4 stuks voor 60 min) aaneengesloten beschikbaar zijn op dezelfde baan.
+        Elke slot bevat al start_full en end_full uit de <option> tags.
+        Match direct op start_time (HH:MM) en voorkeursbaan.
         """
         if not slots:
             return None
 
-        benodigde_slots = duur_min // 15
-
-        # Detecteer formaat uit de eerste slot
-        date_sep, tz_suffix = self._detect_time_format(slots[0]["end_time"])
-
-        # Bouw per baan een set van beschikbare 15-min slot-starttijden
-        court_slot_starts: dict[str, set[datetime]] = {}
-        for slot in slots:
-            try:
-                end_dt = self._parse_end_time(slot["end_time"])
-                if end_dt is None:
-                    self._log.warning(f"Kan end_time niet parsen: {slot['end_time']}")
-                    continue
-                start_dt = end_dt - timedelta(minutes=15)
-                court_guid = slot["court_guid"]
-                court_slot_starts.setdefault(court_guid, set()).add(start_dt)
-            except (ValueError, IndexError):
-                continue
-
         for gewenste_tijd in tijden:
-            try:
-                g_uur, g_min = map(int, gewenste_tijd.split(":"))
-            except ValueError:
-                continue
-
             for baan_nr in (baan_voorkeur or [1, 2, 3, 4]):
                 court_guid = PADEL_COURTS.get(baan_nr)
-                if not court_guid or court_guid not in court_slot_starts:
+                if not court_guid:
                     continue
 
-                beschikbaar = court_slot_starts[court_guid]
+                matching = [
+                    s for s in slots
+                    if s["court_guid"] == court_guid and s["start_time"] == gewenste_tijd
+                ]
 
-                sample_dt = next(iter(beschikbaar))
-                booking_start = sample_dt.replace(hour=g_uur, minute=g_min, second=0)
-
-                alle_vrij = all(
-                    (booking_start + timedelta(minutes=15 * i)) in beschikbaar
-                    for i in range(benodigde_slots)
-                )
-
-                if not alle_vrij:
-                    vrije = sum(
-                        1 for i in range(benodigde_slots)
-                        if (booking_start + timedelta(minutes=15 * i)) in beschikbaar
+                if matching:
+                    slot = matching[0]
+                    self._log.info(
+                        f"Beste slot: {slot['start_time']}-{slot['end_time_short']} "
+                        f"op {slot['court_name']}"
                     )
-                    self._log.debug(
-                        f"Tijd {gewenste_tijd} Padel {baan_nr}: "
-                        f"slechts {vrije}/{benodigde_slots} deelslots vrij"
-                    )
-                    continue
-
-                eind_dt = booking_start + timedelta(minutes=duur_min)
-                fmt_str = f"%Y-%m-%d{date_sep}%H:%M:%S"
-                result = {
-                    "court_guid": court_guid,
-                    "court_name": PADEL_COURT_NAMES.get(court_guid, f"Padel {baan_nr}"),
-                    "start_time": gewenste_tijd,
-                    "start_full": booking_start.strftime(fmt_str) + tz_suffix,
-                    "end_full": eind_dt.strftime(fmt_str) + tz_suffix,
-                }
-                self._log.info(
-                    f"Beste slot: {result['start_time']} - "
-                    f"{eind_dt.strftime('%H:%M')} op {result['court_name']} "
-                    f"({benodigde_slots} aaneengesloten deelslots OK)"
-                )
-                return result
+                    return slot
 
             self._log.debug(f"Tijd {gewenste_tijd} niet beschikbaar op voorkeursbanen")
 
-        self._log.warning("Geen geschikt slot gevonden voor de volledige boekingsduur")
+        self._log.warning("Geen geschikt slot gevonden voor gewenste tijden")
         return None
 
     def _reserveer_baan(self, court_html: str, slot: dict, dry_run: bool = False) -> tuple[bool, str]:
@@ -566,18 +478,12 @@ class ApiReserveringBot:
             if indicator in page_text:
                 return (True, f"Reservering bevestigd ({indicator})")
 
-        # Check foutmeldingen (specifiek genoeg om false positives te voorkomen)
         error_patterns = [
-            ("heeft al een reservering", False),
-            ("maximaal", False),
-            ("bezet", True),
-            ("niet beschikbaar", True),
-            ("er is een fout", True),
-            ("fout opgetreden", True),
-            ("an error occurred", True),
-            ("server error", True),
+            "heeft al een reservering", "maximaal", "bezet",
+            "niet beschikbaar", "er is een fout", "fout opgetreden",
+            "an error occurred", "server error",
         ]
-        for pattern, retryable in error_patterns:
+        for pattern in error_patterns:
             if pattern in page_text:
                 return (False, f"Fout: {pattern}")
 
@@ -589,55 +495,63 @@ class ApiReserveringBot:
         return (False, "Onbekende status - controleer handmatig")
 
     def _bevestig_reservering(self, confirm_html: str) -> tuple[bool, str]:
-        """Stap 4: Bevestig de reservering."""
+        """Stap 4: Bevestig de reservering via AJAX call.
+
+        De KNLTB-site gebruikt geen form POST voor bevestiging maar een AJAX call:
+            <a id="confirmReservationButton"
+               data-url="/Ajax/Profile/SaveReservation"
+               data-redirect="/me/Reservations">
+        """
         self._log.info("Bevestigingspagina bereikt, bevestig reservering...")
 
-        csrf = self._get_csrf(confirm_html)
+        # Dump confirm HTML voor diagnose
+        try:
+            from pathlib import Path
+            dump_path = Path(__file__).parent / "confirm_dump.html"
+            with open(dump_path, "w", encoding="utf-8") as f:
+                f.write(confirm_html)
+            self._log.debug(f"Confirm HTML gedumpt naar: {dump_path}")
+        except Exception as e:
+            self._log.debug(f"Confirm HTML dump mislukt: {e}")
 
-        # Zoek eventuele extra hidden fields
-        extra_fields = {}
-        hidden_inputs = re.findall(
-            r'<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"',
-            confirm_html,
+        # Zoek de AJAX save-URL uit de confirm-button
+        save_match = re.search(
+            r'id="confirmReservationButton"[^>]*data-url="([^"]+)"', confirm_html
         )
-        for name, value in hidden_inputs:
-            if name != "__RequestVerificationToken":
-                extra_fields[name] = value
+        if not save_match:
+            save_match = re.search(r'data-url="(/Ajax/Profile/SaveReservation[^"]*)"', confirm_html)
 
-        post_data = {"__RequestVerificationToken": csrf, **extra_fields}
+        save_url = save_match.group(1) if save_match else "/Ajax/Profile/SaveReservation"
+        if save_url.startswith("/"):
+            save_url = f"{BASE_URL}{save_url}"
+
+        self._log.info(f"AJAX bevestiging via: {save_url}")
 
         resp = self._session.post(
-            f"{BASE_URL}/me/ReservationsConfirm",
-            data=post_data,
+            save_url,
+            headers={"X-Requested-With": "XMLHttpRequest"},
             allow_redirects=True,
         )
 
-        self._log.debug(f"ReservationsConfirm POST -> status {resp.status_code}, URL: {resp.url}")
+        self._log.debug(
+            f"SaveReservation -> status {resp.status_code}, "
+            f"URL: {resp.url}, body: {resp.text[:300]}"
+        )
 
-        page_text = resp.text.lower()
+        if resp.status_code == 200:
+            body = resp.text.strip().lower()
+            error_patterns = [
+                "heeft al een reservering", "maximaal", "niet beschikbaar",
+                "er is een fout", "fout opgetreden", "server error",
+            ]
+            for pattern in error_patterns:
+                if pattern in body:
+                    return (False, f"Bevestiging mislukt: {pattern}")
 
-        success_indicators = [
-            "reservering geplaatst", "reservering bevestigd",
-            "succesvol gereserveerd", "gelukt", "bevestigd",
-        ]
-        for indicator in success_indicators:
-            if indicator in page_text:
-                self._log.info(f"Reservering bevestigd: {indicator}")
-                return (True, f"Reservering bevestigd ({indicator})")
+            self._log.info("SaveReservation OK (status 200)")
+            return (True, "Reservering bevestigd via AJAX")
 
-        # Check of we van de wizard-pagina's weg zijn (= succes)
-        if not any(p in resp.url.lower() for p in ("reservationsplayers", "reservationsday", "reservationscourt", "reservationsconfirm")):
-            self._log.info(f"Wizard verlaten (URL: {resp.url}) - reservering waarschijnlijk gelukt")
-            return (True, "Reservering bevestigd (wizard verlaten)")
-
-        # Foutmeldingen (specifiek genoeg om false positives te voorkomen)
-        for pattern in ["heeft al een reservering", "maximaal", "bezet",
-                         "er is een fout", "fout opgetreden",
-                         "an error occurred", "server error"]:
-            if pattern in page_text:
-                return (False, f"Bevestiging mislukt: {pattern}")
-
-        return (False, "Geen bevestiging ontvangen - controleer handmatig")
+        return (False, f"SaveReservation mislukt (status {resp.status_code})")
 
     # =========================================================================
     # SPELER DISCOVERY
@@ -748,10 +662,9 @@ class ApiReserveringBot:
                 return result
 
             # Vind beste slot
-            duur = self.config.get("reservering", {}).get("duur_minuten", 60)
-            slot = self._vind_beste_slot(slots, tijden, baan_voorkeur or [], duur)
+            slot = self._vind_beste_slot(slots, tijden, baan_voorkeur or [])
             if not slot:
-                beschikbare = sorted(set(s.get("end_time_short", "?") for s in slots))
+                beschikbare = sorted(set(s.get("start_time", "?") for s in slots))
                 self._laatste_fout = (
                     f"Geen padelbaan vrij op gewenste tijden ({', '.join(tijden)}). "
                     f"Wel slots beschikbaar rond: {', '.join(beschikbare[:5])}"
