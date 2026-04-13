@@ -3,6 +3,9 @@ screenshots/
 reservering.log
 court_dump.html
 
+# Credentials
+.env
+
 # Python
 __pycache__/
 *.pyc

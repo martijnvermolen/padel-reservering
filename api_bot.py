@@ -25,6 +25,7 @@ import requests
 NL_TZ = ZoneInfo("Europe/Amsterdam")
 
 BASE_URL = "https://tpv-heksenwiel.knltb.site"
+HTTP_TIMEOUT = 15  # Seconden per HTTP-request (voorkomt dat trage responses de retry-loop blokkeren)
 
 PADEL_COURTS = {
     1: "27247a4e-0443-411a-be10-ba08ccd40cde",
@@ -40,6 +41,14 @@ class ReserveringError(Exception):
     pass
 
 
+class _TimeoutSession(requests.Session):
+    """Session met een standaard timeout op alle requests."""
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", HTTP_TIMEOUT)
+        return super().request(*args, **kwargs)
+
+
 class ApiReserveringBot:
     """Directe HTTP-gebaseerde padelbaan reservering via KNLTB.site."""
 
@@ -53,7 +62,7 @@ class ApiReserveringBot:
 
     def start(self):
         """Start een HTTP-sessie en log in."""
-        self._session = requests.Session()
+        self._session = _TimeoutSession()
         self._session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         })
@@ -557,14 +566,16 @@ class ApiReserveringBot:
             if indicator in page_text:
                 return (True, f"Reservering bevestigd ({indicator})")
 
-        # Check foutmeldingen
+        # Check foutmeldingen (specifiek genoeg om false positives te voorkomen)
         error_patterns = [
             ("heeft al een reservering", False),
             ("maximaal", False),
             ("bezet", True),
             ("niet beschikbaar", True),
-            ("fout", True),
-            ("error", True),
+            ("er is een fout", True),
+            ("fout opgetreden", True),
+            ("an error occurred", True),
+            ("server error", True),
         ]
         for pattern, retryable in error_patterns:
             if pattern in page_text:
@@ -619,8 +630,10 @@ class ApiReserveringBot:
             self._log.info(f"Wizard verlaten (URL: {resp.url}) - reservering waarschijnlijk gelukt")
             return (True, "Reservering bevestigd (wizard verlaten)")
 
-        # Foutmeldingen
-        for pattern in ["heeft al een reservering", "maximaal", "bezet", "fout", "error"]:
+        # Foutmeldingen (specifiek genoeg om false positives te voorkomen)
+        for pattern in ["heeft al een reservering", "maximaal", "bezet",
+                         "er is een fout", "fout opgetreden",
+                         "an error occurred", "server error"]:
             if pattern in page_text:
                 return (False, f"Bevestiging mislukt: {pattern}")
 
@@ -686,6 +699,8 @@ class ApiReserveringBot:
 
         except ReserveringError as e:
             return str(e)
+        except (requests.Timeout, requests.ConnectionError) as e:
+            return f"Verbindingsfout bij voorbereiding: {e}"
         except Exception as e:
             return f"Onverwachte fout bij voorbereiding: {e}"
 
@@ -762,6 +777,10 @@ class ApiReserveringBot:
         except ReserveringError as e:
             result["foutmelding"] = str(e)
             result["retry"] = True
+        except (requests.Timeout, requests.ConnectionError) as e:
+            result["foutmelding"] = f"Verbindingsfout: {e}"
+            result["retry"] = True
+            self._log.warning(f"HTTP timeout/verbindingsfout: {e}")
         except Exception as e:
             result["foutmelding"] = f"Fout: {e}"
             result["retry"] = True

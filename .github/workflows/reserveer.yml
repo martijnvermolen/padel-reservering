@@ -9,9 +9,9 @@ on:
     # te reserveren is en stopt direct. GitHub Actions cron kan 5-30 min
     # vertraagd zijn, dus 20 min buffer is noodzakelijk.
     #
-    # DINSDAG 20:30 -> 48u eerder = ZONDAG 20:30 NL -> start 20:10 NL
-    - cron: '10 18 * * 0'    # zomer (UTC+2): zo 20:10 CEST
-    - cron: '10 19 * * 0'    # winter (UTC+1): zo 20:10 CET
+    # DINSDAG 21:30 -> 48u eerder = ZONDAG 21:30 NL -> start 21:10 NL
+    - cron: '10 19 * * 0'    # zomer (UTC+2): zo 21:10 CEST
+    - cron: '10 20 * * 0'    # winter (UTC+1): zo 21:10 CET
     #
     # ZONDAG 19:30 -> 48u eerder = VRIJDAG 19:30 NL -> start 19:10 NL
     - cron: '10 17 * * 5'    # zomer (UTC+2): vr 19:10 CEST
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    timeout-minutes: 40         # Ruim voor wachttijd + retry-loop (winter kan tot 25 min wachten)
+    timeout-minutes: 120        # Ruim voor wachttijd + retry-loop (acceptatievenster tot 90 min)
 
     steps:
       - name: Checkout code

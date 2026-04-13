@@ -162,11 +162,10 @@ def bereken_target_datum(dag_config: dict, uren_vooruit: int) -> date | None:
         uur, minuut, tzinfo=NL_TZ,
     )
 
-    # Accepteer targets tot 35 min voorbij de 48u-grens.
-    # Verkeerde-seizoen triggers komen ~60-80 min te vroeg (winter) of ~40 min
-    # te laat (zomer) en worden dus nog steeds geweerd. De correcte trigger
-    # start 20 min voor het venster, maar GHA kan tot 15 min vroeger starten.
-    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=35)
+    # Accepteer targets tot 90 min voorbij de 48u-grens.
+    # Ruime marge zodat de bot ook werkt als de cron iets te vroeg triggert
+    # (bijv. GHA-vertraging, of config-wijziging zonder cron-update).
+    max_tijdstip = nu + timedelta(hours=uren_vooruit, minutes=90)
     if target_met_tijd > max_tijdstip:
         return None
 
